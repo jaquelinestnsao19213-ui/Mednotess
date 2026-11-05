@@ -182,3 +182,40 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .slash-item { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--ink); padding: 9px 10px; border-radius: 6px; }
 .slash-item.on { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .subpages { margin-top: 28px; }
+
+/* ---------- Passo 4: menu, painel e disciplinas ---------- */
+.mainnav { max-width: 720px; margin: 0 auto; padding: 0 20px 6px; display: flex; gap: 6px; overflow-x: auto; }
+.mainnav a { padding: 7px 12px; border-radius: 999px; text-decoration: none; color: var(--muted); white-space: nowrap; font-size: 0.95rem; }
+.mainnav a.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.dcard {
+  display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 14px;
+  background: color-mix(in srgb, var(--c, var(--accent)) 14%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--c, var(--accent)) 30%, var(--line));
+  text-decoration: none; min-height: 120px;
+}
+.dcard.link:hover { border-color: var(--c); }
+.dcard strong { font-size: 1.05rem; }
+.dcard .row { margin-top: auto; }
+.dicon { font-size: 1.7rem; line-height: 1; }
+.dicon.big { font-size: 2.6rem; }
+.subject-head { display: flex; align-items: center; gap: 12px; margin: 6px 0 16px; padding-bottom: 12px; border-bottom: 3px solid var(--c); }
+
+.panel { display: grid; gap: 4px; padding: 14px; margin: 12px 0 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+.panel label, .link-existing { display: grid; gap: 6px; font-size: 0.9rem; color: var(--muted); }
+.panel input, .link-existing select, .topic-add input, .topics input, .icon-input {
+  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
+}
+.icon-input { width: 80px; }
+.swatch.picked { outline: 3px solid var(--ink); outline-offset: 2px; }
+.btn-link { display: inline-block; padding: 9px 14px; border-radius: 8px; text-decoration: none; }
+.link-existing { margin: 14px 0 0; }
+.topic-add { margin: 10px 0 14px; flex-wrap: nowrap; }
+.topic-add input { flex: 1; min-width: 0; }
+.topics { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.topics li { display: flex; gap: 8px; align-items: center; }
+.topics li input { flex: 1; min-width: 0; }
+.topics .open { background: var(--surface); color: var(--ink); font: inherit; white-space: nowrap; }
+.topics .open:disabled { opacity: 0.45; cursor: not-allowed; }
+.icon-del { background: transparent; border: 0; color: var(--muted); padding: 6px 8px; }

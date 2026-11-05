@@ -11,3 +11,22 @@ export type PageRow = {
   created_at: string;
   updated_at: string;
 };
+
+export type Subject = {
+  id: string;
+  name: string;
+  color: string;
+  icon: string | null;
+  notebook_page_id: string | null;
+  position: number;
+  created_at: string;
+};
+
+export type Topic = {
+  id: string;
+  subject_id: string;
+  name: string;
+  page_id: string | null;
+  position: number;
+  created_at: string;
+};

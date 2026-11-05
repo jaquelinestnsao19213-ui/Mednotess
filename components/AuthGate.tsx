@@ -1,11 +1,19 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
+const NAV = [
+  { href: "/", label: "Início" },
+  { href: "/disciplinas", label: "Disciplinas" },
+  { href: "/cadernos", label: "Cadernos" },
+];
+
 export default function AuthGate({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
 
@@ -29,6 +37,16 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
           Sair
         </button>
       </header>
+      <nav className="mainnav" aria-label="Áreas do aplicativo">
+        {NAV.map((n) => {
+          const active = n.href === "/" ? pathname === "/" : pathname.startsWith(n.href);
+          return (
+            <Link key={n.href} href={n.href} className={active ? "on" : ""} aria-current={active ? "page" : undefined}>
+              {n.label}
+            </Link>
+          );
+        })}
+      </nav>
       <main className="shell">{children}</main>
     </>
   );
