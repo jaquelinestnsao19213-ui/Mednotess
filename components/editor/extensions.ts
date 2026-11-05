@@ -3,6 +3,7 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import Image from "@tiptap/extension-image";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import ImageView from "./ImageView";
+import PdfCardView from "./PdfCardView";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -147,11 +148,14 @@ export const Toggle = Node.create({
   },
 });
 
-// Cartão de PDF anexado: abre em outra aba ao tocar.
+// PDF anexado: aparece aberto dentro da página (com zoom e anotações).
+// O HTML de reserva continua sendo um link que abre o arquivo em outra aba.
 export const FileCard = Node.create({
   name: "fileCard",
   group: "block",
   atom: true,
+  selectable: true,
+  draggable: false,
   addAttributes() {
     return {
       url: { default: "", rendered: false, parseHTML: (el: HTMLElement) => el.getAttribute("href") ?? "" },
@@ -174,6 +178,10 @@ export const FileCard = Node.create({
       }),
       `📄 ${node.attrs.name}`,
     ];
+  },
+  addNodeView() {
+    // stopEvent: o editor não interfere nos toques e na caneta dentro do leitor.
+    return ReactNodeViewRenderer(PdfCardView, { stopEvent: () => true });
   },
 });
 
