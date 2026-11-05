@@ -56,7 +56,14 @@ function PageView({ id }: { id: string }) {
   }
 
   useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushRef.current();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
     return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
       if (timer.current) clearTimeout(timer.current);
       flushRef.current();
     };
