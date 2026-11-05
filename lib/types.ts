@@ -3,8 +3,10 @@ export type PageRow = {
   parent_id: string | null;
   type: "page" | "notebook" | "lesson" | "diary" | "task" | "exam";
   title: string;
-  content: { type: string; text: string }[];
-  props: Record<string, unknown>;
+  icon: string | null;
+  cover_url: string | null;
+  content: unknown;
+  props: { date?: string; discipline?: string; room?: string; [key: string]: unknown };
   position: number;
   created_at: string;
   updated_at: string;

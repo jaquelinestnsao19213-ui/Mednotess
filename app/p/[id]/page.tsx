@@ -1,93 +1,135 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { JSONContent } from "@tiptap/core";
 import { supabase } from "@/lib/supabase";
+import { uploadFile } from "@/lib/upload";
+import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
 import type { PageRow } from "@/lib/types";
+
+const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
 type Crumb = { id: string; title: string };
 
-export default function PageView() {
+export default function PageRoute() {
   const { id } = useParams<{ id: string }>();
-  const router = useRouter();
+  return <PageView key={id} id={id} />;
+}
 
+function PageView({ id }: { id: string }) {
+  const router = useRouter();
   const [page, setPage] = useState<PageRow | null>(null);
   const [children, setChildren] = useState<PageRow[]>([]);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
-  const [title, setTitle] = useState("");
-  const [text, setText] = useState("");
   const [status, setStatus] = useState<"saved" | "saving">("saved");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const coverInput = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
-    if (!row) return setNotFound(true);
-    const current = row as PageRow;
-    setPage(current);
-    setTitle(current.title);
-    setText(current.content?.[0]?.text ?? "");
+  async function flush() {
+    const patch = pending.current;
+    pending.current = {};
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await supabase.from("pages").update(patch).eq("id", id);
+    setError(error ? "Não foi possível salvar. Tente de novo." : null);
+    setStatus("saved");
+  }
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
 
-    const { data: kids } = await supabase
-      .from("pages")
-      .select("*")
-      .eq("parent_id", id)
-      .order("position")
-      .order("created_at");
-    setChildren((kids ?? []) as PageRow[]);
-
-    const trail: Crumb[] = [];
-    let parent = current.parent_id;
-    for (let i = 0; i < 10 && parent; i++) {
-      const { data: p } = await supabase.from("pages").select("id,title,parent_id").eq("id", parent).maybeSingle();
-      if (!p) break;
-      trail.unshift({ id: p.id, title: p.title });
-      parent = p.parent_id;
-    }
-    setCrumbs(trail);
-  }, [id]);
-
-  useEffect(() => {
-    setPage(null);
-    setNotFound(false);
-    load();
-  }, [load]);
-
-  function scheduleSave(nextTitle: string, nextText: string) {
+  function save(patch: Record<string, unknown>) {
+    pending.current = { ...pending.current, ...patch };
     setStatus("saving");
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(async () => {
-      const { error } = await supabase
-        .from("pages")
-        .update({ title: nextTitle, content: [{ type: "text", text: nextText }] })
-        .eq("id", id);
-      if (error) setError("Não foi possível salvar. Tente de novo.");
-      else setError(null);
-      setStatus("saved");
-    }, 800);
+    timer.current = setTimeout(() => flushRef.current(), 800);
   }
 
-  async function createSubpage() {
+  function update(patch: Partial<PageRow>) {
+    setPage((p) => (p ? { ...p, ...patch } : p));
+    save(patch);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+      flushRef.current();
+    };
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
+      if (!row) return setNotFound(true);
+      const current = row as PageRow;
+      setPage(current);
+
+      const { data: kids } = await supabase
+        .from("pages")
+        .select("*")
+        .eq("parent_id", id)
+        .order("position")
+        .order("created_at");
+      setChildren((kids ?? []) as PageRow[]);
+
+      const trail: Crumb[] = [];
+      let parent = current.parent_id;
+      for (let i = 0; i < 10 && parent; i++) {
+        const { data: p } = await supabase.from("pages").select("id,title,parent_id").eq("id", parent).maybeSingle();
+        if (!p) break;
+        trail.unshift({ id: p.id, title: p.title });
+        parent = p.parent_id;
+      }
+      setCrumbs(trail);
+    })();
+  }, [id]);
+
+  async function addChild(kind: "lesson" | "page") {
+    const row =
+      kind === "lesson"
+        ? { title: "Nova aula / tema", type: "lesson", content: LESSON_TEMPLATE }
+        : { title: "Nova página", type: "page" };
     const { data, error } = await supabase
       .from("pages")
-      .insert({ title: "Nova página", type: "page", parent_id: id })
+      .insert({ ...row, parent_id: id })
       .select("id")
       .single();
-    if (error || !data) return setError("Não foi possível criar a subpágina.");
+    if (error || !data) return setError("Não foi possível criar a página.");
     router.push(`/p/${data.id}`);
+  }
+
+  async function updateChild(childId: string, patch: Partial<PageRow>) {
+    const { error } = await supabase.from("pages").update(patch).eq("id", childId);
+    if (error) setError("Não foi possível salvar a alteração na tabela.");
+  }
+
+  function editChildLocal(childId: string, patch: Partial<PageRow>) {
+    setChildren((list) => list.map((c) => (c.id === childId ? { ...c, ...patch } : c)));
+  }
+
+  async function onCover(file: File | undefined) {
+    if (!file) return;
+    try {
+      update({ cover_url: await uploadFile(file) });
+    } catch {
+      setError("Não foi possível enviar a capa. Confira se rodou o schema2.sql no Supabase.");
+    }
   }
 
   async function remove() {
     if (!page) return;
-    const hasKids = children.length > 0;
     const ok = window.confirm(
-      hasKids
-        ? "Excluir esta página e todas as subpáginas dela? Isso não pode ser desfeito."
+      children.length > 0
+        ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito."
         : "Excluir esta página? Isso não pode ser desfeito."
     );
     if (!ok) return;
+    pending.current = {};
     const { error } = await supabase.from("pages").delete().eq("id", id);
     if (error) return setError("Não foi possível excluir.");
     router.push(page.parent_id ? `/p/${page.parent_id}` : "/");
@@ -95,6 +137,62 @@ export default function PageView() {
 
   if (notFound) return <p className="empty">Página não encontrada. <Link href="/">Voltar ao início</Link></p>;
   if (!page) return <p className="muted">Carregando…</p>;
+
+  const isLesson = page.type === "lesson";
+
+  const table = (
+    <section className="subpages">
+      <div className="head">
+        <h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2>
+        <div className="row">
+          <button className="primary" onClick={() => addChild("lesson")}>Nova aula</button>
+          <button className="secondary" onClick={() => addChild("page")}>Nova página</button>
+        </div>
+      </div>
+      {children.length === 0 ? (
+        <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr><th>Aula / tema</th><th>Data</th><th></th></tr>
+            </thead>
+            <tbody>
+              {children.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <input
+                      value={c.title}
+                      aria-label="Título"
+                      onChange={(e) => editChildLocal(c.id, { title: e.target.value })}
+                      onBlur={(e) => updateChild(c.id, { title: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="date"
+                      value={c.props?.date ?? ""}
+                      aria-label="Data"
+                      onChange={(e) => {
+                        const props = { ...c.props, date: e.target.value };
+                        editChildLocal(c.id, { props });
+                        updateChild(c.id, { props });
+                      }}
+                    />
+                  </td>
+                  <td><Link className="open" href={`/p/${c.id}`}>Abrir</Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+
+  const editor = (
+    <Editor key={page.id} initial={toDoc(page.content)} onChange={(doc: JSONContent) => save({ content: doc })} />
+  );
 
   return (
     <>
@@ -108,47 +206,55 @@ export default function PageView() {
         ))}
       </nav>
 
-      <input
-        className="title-input display"
-        value={title}
-        placeholder="Sem título"
-        onChange={(e) => {
-          setTitle(e.target.value);
-          scheduleSave(e.target.value, text);
-        }}
-        aria-label="Título da página"
-      />
+      {page.cover_url ? (
+        <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }}>
+          <div className="cover-actions">
+            <button className="secondary" onClick={() => coverInput.current?.click()}>Trocar capa</button>
+            <button className="secondary" onClick={() => update({ cover_url: null })}>Remover</button>
+          </div>
+        </div>
+      ) : (
+        <button className="secondary small-btn" onClick={() => coverInput.current?.click()}>Adicionar capa</button>
+      )}
+      <input ref={coverInput} type="file" accept="image/*" hidden onChange={(e) => { onCover(e.target.files?.[0]); e.target.value = ""; }} />
+
+      <div className="titlebar">
+        <button
+          className="icon-btn"
+          aria-label="Trocar ícone"
+          onClick={() => {
+            const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
+            if (v !== null) update({ icon: v.trim() || null });
+          }}
+        >
+          {page.icon || "＋"}
+        </button>
+        <input
+          className="title-input display"
+          value={page.title}
+          placeholder="Sem título"
+          onChange={(e) => update({ title: e.target.value })}
+          aria-label="Título da página"
+        />
+      </div>
       <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
       {error && <p className="notice">{error}</p>}
 
-      <textarea
-        className="body-input"
-        value={text}
-        placeholder="Escreva aqui as suas anotações…"
-        onChange={(e) => {
-          setText(e.target.value);
-          scheduleSave(title, e.target.value);
-        }}
-        aria-label="Anotações"
-      />
-
-      <section className="subpages">
-        <div className="head">
-          <h2>Subpáginas</h2>
-          <button className="secondary" onClick={createSubpage}>Nova subpágina</button>
+      {isLesson && (
+        <div className="props">
+          <label>Data
+            <input type="date" value={page.props?.date ?? ""} onChange={(e) => update({ props: { ...page.props, date: e.target.value } })} />
+          </label>
+          <label>Disciplina
+            <input value={page.props?.discipline ?? ""} placeholder="Ex.: Tutoria" onChange={(e) => update({ props: { ...page.props, discipline: e.target.value } })} />
+          </label>
+          <label>Sala
+            <input value={page.props?.room ?? ""} placeholder="Ex.: 314 — Bloco D" onChange={(e) => update({ props: { ...page.props, room: e.target.value } })} />
+          </label>
         </div>
-        {children.length === 0 ? (
-          <p className="empty">Sem subpáginas. Use para separar aulas, temas ou resumos.</p>
-        ) : (
-          <ul className="list">
-            {children.map((c) => (
-              <li key={c.id}>
-                <Link href={`/p/${c.id}`}>{c.title || "Sem título"}</Link>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      )}
+
+      {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
 
       <button className="danger" onClick={remove}>Excluir página</button>
     </>

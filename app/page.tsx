@@ -48,7 +48,7 @@ export default function Home() {
       <ul className="list">
         {pages?.map((p) => (
           <li key={p.id}>
-            <Link href={`/p/${p.id}`}>{p.title || "Sem título"}</Link>
+            <Link href={`/p/${p.id}`}>{p.icon ? `${p.icon} ` : ""}{p.title || "Sem título"}</Link>
           </li>
         ))}
       </ul>
