@@ -18,6 +18,7 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode } from "./editor/extensions";
 import { uploadFile } from "@/lib/upload";
+import { exportEditorAsPdf } from "@/lib/export-pdf";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
 
@@ -186,7 +187,6 @@ export default function Editor({
     },
   });
 
-  // Mantém a barra de baixo colada no teclado (também no iPhone).
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -217,6 +217,13 @@ export default function Editor({
     }
   }
 
+  const exportPdf = () => {
+    if (!editor) return;
+    const ok = exportEditorAsPdf(editor, "anotacao");
+    if (!ok) setMessage("O navegador bloqueou a abertura da janela de impressão.");
+    else setMessage(null);
+  };
+
   if (!editor) return null;
   const chain = () => editor.chain().focus();
   const keep = (e: React.MouseEvent) => e.preventDefault();
@@ -238,12 +245,13 @@ export default function Editor({
           <button type="button" aria-label="Sublinhado" className={editor.isActive("underline") ? "on" : ""} onClick={() => chain().toggleUnderline().run()}><u>U</u></button>
           <button type="button" aria-label="Tachado" className={editor.isActive("strike") ? "on" : ""} onClick={() => chain().toggleStrike().run()}><s>S</s></button>
           <button type="button" aria-label="Marca-texto amarelo" className={editor.isActive("highlight") ? "on" : ""} onClick={() => chain().toggleHighlight({ color: MARKERS[0].v }).run()}>▮</button>
+          <button type="button" aria-label="Baixar em PDF" className="pdf-export-bubble" onClick={exportPdf}>PDF</button>
           <button type="button" aria-label="Mais opções de texto" onClick={() => setSheet(sheet === "format" ? null : "format")}>Aa</button>
         </div>
       </BubbleMenu>
 
       <EditorContent editor={editor} />
-{message && <p className="notice">{message}</p>}
+      {message && <p className="notice">{message}</p>}
       {slash && items.length > 0 && (
         <div className="slash" style={{ top: slash.top, left: slash.left }} onMouseDown={keep} role="listbox" aria-label="Inserir bloco">
           {items.map((it, i) => (
@@ -353,6 +361,7 @@ export default function Editor({
             <button type="button" aria-label="Lista com marcadores" className={editor.isActive("bulletList") ? "on" : ""} onClick={() => chain().toggleBulletList().run()}>•</button>
             <button type="button" aria-label="Lista de tarefas" className={editor.isActive("taskList") ? "on" : ""} onClick={() => chain().toggleTaskList().run()}>☑</button>
             <button type="button" aria-label="Inserir imagem" onClick={() => imageInput.current?.click()}>Img</button>
+            <button type="button" aria-label="Baixar PDF" className="pdf-export-btn" onClick={exportPdf}>PDF</button>
             <button type="button" aria-label="Desfazer" disabled={!editor.can().undo()} onClick={() => chain().undo().run()}>↶</button>
             <button type="button" aria-label="Refazer" disabled={!editor.can().redo()} onClick={() => chain().redo().run()}>↷</button>
             <button type="button" aria-label="Fechar teclado" onClick={() => editor.commands.blur()}>⌄</button>
