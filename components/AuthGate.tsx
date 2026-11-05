@@ -9,6 +9,7 @@ import { supabase } from "@/lib/supabase";
 const NAV = [
   { href: "/", label: "Início" },
   { href: "/disciplinas", label: "Disciplinas" },
+  { href: "/planejamento", label: "Planejamento" },
   { href: "/cadernos", label: "Cadernos" },
 ];
 
@@ -32,8 +33,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <>
       <header className="topbar">
-        <Link href="/" className="brand">Meus cadernos</Link>
-        <button className="link-button" onClick={() => supabase.auth.signOut()}>
+        <Link href="/" className="brand"><span className="brand-mark" aria-hidden="true">✳</span> Meu espaço</Link>
+        <button className="link-button signout-button" onClick={() => supabase.auth.signOut()}>
           Sair
         </button>
       </header>
@@ -77,7 +78,7 @@ function LoginForm() {
 
   return (
     <main className="shell login">
-      <h1 className="display">Meus cadernos</h1>
+      <h1 className="display">Meu espaço</h1>
       <p className="muted">Entre para ver suas aulas, resumos e diário.</p>
       <label>
         E-mail

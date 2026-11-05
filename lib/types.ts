@@ -30,3 +30,15 @@ export type Topic = {
   position: number;
   created_at: string;
 };
+
+export type StudyTask = {
+  id: string;
+  user_id: string;
+  subject_id: string | null;
+  title: string;
+  topic: string | null;
+  time_label: string;
+  scheduled_date: string;
+  completed: boolean;
+  created_at: string;
+};
