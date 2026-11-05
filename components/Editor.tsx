@@ -230,7 +230,6 @@ export default function Editor({
 
   return (
     <div className="editor">
-      {message && <p className="notice">{message}</p>}
 
       <BubbleMenu editor={editor} tippyOptions={{ duration: 100, placement: "top" }}>
         <div className="bubble" onMouseDown={keep}>
@@ -244,7 +243,7 @@ export default function Editor({
       </BubbleMenu>
 
       <EditorContent editor={editor} />
-
+{message && <p className="notice">{message}</p>}
       {slash && items.length > 0 && (
         <div className="slash" style={{ top: slash.top, left: slash.left }} onMouseDown={keep} role="listbox" aria-label="Inserir bloco">
           {items.map((it, i) => (
