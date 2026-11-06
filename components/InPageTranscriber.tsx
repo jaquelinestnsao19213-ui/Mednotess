@@ -2,19 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { deleteSessionChunks, listSessionChunks, saveAudioChunk, saveChunkTranscript } from "@/lib/transcription-chunks";
 
 type ChunkState = { index: number; status: "enviando" | "concluído" | "falha" };
-type Props = { pageTitle: string; pageContext: string; onInsert: (markdown: string) => void };
+type Props = {
+  pageTitle: string;
+  pageContext: string;
+  selectedText?: string;
+  onInsert: (markdown: string) => void;
+  onReplaceSelection?: (markdown: string) => boolean;
+};
 
 const SEGMENT_MS = 45_000;
 const MAX_RECORDING_SECONDS = 4 * 60 * 60;
+const ACTIVE_SESSION_KEY = "mednotes-transcription-active-session";
 const DEFAULT_PROMPT = "Organize como material de estudo. Priorize resumo geral, conceitos fundamentais, explicações detalhadas, exemplos do professor, classificações e diferenças, pontos para memorizar e dúvidas para revisar.";
-
 function formatTime(seconds: number) {
-  const hours = Math.floor(seconds / 3600).toString().padStart(2, "0");
-  const minutes = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
-  const rest = (seconds % 60).toString().padStart(2, "0");
-  return `${hours}:${minutes}:${rest}`;
+  return `${Math.floor(seconds / 3600).toString().padStart(2, "0")}:${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 function extensionFor(type: string) {
   if (type.includes("mp4")) return "m4a";
@@ -23,7 +27,7 @@ function extensionFor(type: string) {
   return "webm";
 }
 
-export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: Props) {
+export default function InPageTranscriber({ pageTitle, pageContext, selectedText = "", onInsert, onReplaceSelection }: Props) {
   const [recording, setRecording] = useState(false);
   const [paused, setPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -37,6 +41,7 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
   const [transcript, setTranscript] = useState("");
   const [summary, setSummary] = useState("");
   const [copied, setCopied] = useState(false);
+  const [recoverySession, setRecoverySession] = useState<string | null>(null);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -51,17 +56,33 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
   const autoStopRef = useRef<() => void>(() => undefined);
 
   useEffect(() => {
-    if (!recording || paused) return;
-    const timer = window.setInterval(() => {
-      setSeconds((value) => {
-        if (value + 1 >= MAX_RECORDING_SECONDS) {
-          window.clearInterval(timer);
-          autoStopRef.current();
-          return value + 1;
-        }
-        return value + 1;
+    let cancelled = false;
+    const sessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+    if (!sessionId) return;
+    void listSessionChunks(sessionId).then((records) => {
+      if (cancelled || !records.length) return;
+      const audioMap = new Map<number, Blob>();
+      const textMap = new Map<number, string>();
+      records.forEach((record) => {
+        if (record.audio) audioMap.set(record.index, record.audio);
+        if (record.transcript) textMap.set(record.index, record.transcript);
       });
-    }, 1000);
+      pendingAudioRef.current = audioMap;
+      transcriptPartsRef.current = textMap;
+      segmentIndexRef.current = Math.max(...records.map((record) => record.index));
+      setChunks(records.map((record) => ({ index: record.index, status: record.transcript ? "concluído" : "falha" })));
+      if (audioMap.size) { setRecoverySession(sessionId); setPanelOpen(true); }
+      else void deleteSessionChunks(sessionId).then(() => localStorage.removeItem(ACTIVE_SESSION_KEY));
+    }).catch(() => setError("Não foi possível recuperar os blocos locais. Verifique as permissões de armazenamento do navegador."));
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!recording || paused) return;
+    const timer = window.setInterval(() => setSeconds((value) => {
+      if (value + 1 >= MAX_RECORDING_SECONDS) { window.clearInterval(timer); autoStopRef.current(); return value + 1; }
+      return value + 1;
+    }), 1000);
     return () => window.clearInterval(timer);
   }, [recording, paused]);
 
@@ -81,37 +102,39 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
     setChunks((state) => state.some((item) => item.index === index)
       ? state.map((item) => item.index === index ? { ...item, status: "enviando" } : item)
       : [...state, { index, status: "enviando" }]);
+    await saveAudioChunk(localStorage.getItem(ACTIVE_SESSION_KEY)!, index, blob);
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const token = await getAccessToken();
         const form = new FormData();
         form.append("audio", blob, `aula-${index}.${extensionFor(blob.type)}`);
-        const response = await fetch("/api/meeting/chunk", {
-          method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form, cache: "no-store",
-        });
+        const response = await fetch("/api/meeting/chunk", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form, cache: "no-store" });
         const result = await response.json() as { error?: string; transcript?: string };
         if (!response.ok) throw new Error(result.error || "Falha ao transcrever um bloco.");
         if (!result.transcript?.trim()) throw new Error("Nenhuma fala foi identificada neste bloco.");
-        // Stable index makes response retries idempotent on the client; never append blindly.
-        transcriptPartsRef.current.set(index, result.transcript.trim());
+        const text = result.transcript.trim();
+        transcriptPartsRef.current.set(index, text);
+        // Persist transcript and clear the audio blob before marking it complete.
+        const sessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+        if (sessionId) await saveChunkTranscript(sessionId, index, text);
         pendingAudioRef.current.delete(index);
         setChunks((state) => state.map((item) => item.index === index ? { ...item, status: "concluído" } : item));
         return;
       } catch (cause) {
         lastError = cause instanceof Error ? cause : new Error("Falha na conexão.");
-        if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 700 * 2 ** attempt));
+        if (attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, 750 * 2 ** attempt));
       }
     }
-    // Keep the Blob in memory until a successful transcript response is received.
     pendingAudioRef.current.set(index, blob);
     setChunks((state) => state.map((item) => item.index === index ? { ...item, status: "falha" } : item));
     throw lastError ?? new Error("Não foi possível enviar o bloco.");
   }
 
   function enqueueChunk(index: number, blob: Blob) {
-    // Keep the queue ordered and retain audio until sendChunk confirms success.
     pendingAudioRef.current.set(index, blob);
+    const sessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+    if (sessionId) void saveAudioChunk(sessionId, index, blob).catch((cause) => setError(cause instanceof Error ? cause.message : "Falha ao guardar temporariamente o áudio."));
     queueRef.current = queueRef.current.catch(() => undefined).then(() => sendChunk(index, blob)).catch(() => undefined);
   }
 
@@ -128,97 +151,78 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
       const blob = new Blob(partsRef.current, { type: recorder.mimeType || "audio/webm" });
       partsRef.current = [];
       if (blob.size) enqueueChunk(++segmentIndexRef.current, blob);
-      if (recordingWantedRef.current) {
-        // Rotate the MediaRecorder automatically; user never restarts between segments.
-        startSegment(stream);
-      } else {
-        stream.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-        stopResolverRef.current?.();
-        stopResolverRef.current = null;
+      if (recordingWantedRef.current) startSegment(stream);
+      else {
+        stream.getTracks().forEach((track) => track.stop()); streamRef.current = null;
+        stopResolverRef.current?.(); stopResolverRef.current = null;
       }
     };
     recorder.start();
-    segmentTimerRef.current = window.setTimeout(() => {
-      if (recordingWantedRef.current && recorder.state === "recording") recorder.stop();
-    }, SEGMENT_MS);
+    segmentTimerRef.current = window.setTimeout(() => { if (recordingWantedRef.current && recorder.state === "recording") recorder.stop(); }, SEGMENT_MS);
   }
 
   async function startRecording() {
     if (!consent || recording || processing) return;
     setError(null); setStatus(""); setTranscript(""); setSummary(""); setChunks([]); setSeconds(0);
-    segmentIndexRef.current = 0;
-    transcriptPartsRef.current = new Map();
-    pendingAudioRef.current = new Map();
-    queueRef.current = Promise.resolve();
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setError("Este navegador não permite gravação de áudio."); return;
-    }
+    segmentIndexRef.current = 0; transcriptPartsRef.current = new Map(); pendingAudioRef.current = new Map(); queueRef.current = Promise.resolve();
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") { setError("Este navegador não permite gravação de áudio."); return; }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-      recordingWantedRef.current = true;
-      startSegment(stream);
-      setRecording(true); setPaused(false); setPanelOpen(true);
-    } catch {
-      setError("Não foi possível acessar o microfone. Permita o acesso nas configurações do navegador.");
+      const sessionId = crypto.randomUUID();
+      localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+      recordingWantedRef.current = true; startSegment(stream); setRecording(true); setPaused(false); setPanelOpen(true); setRecoverySession(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Não foi possível acessar o microfone. Permita o acesso nas configurações do navegador.");
     }
   }
 
   function togglePause() {
     const recorder = recorderRef.current;
     if (!recorder) return;
-    if (recorder.state === "recording") { recorder.pause(); setPaused(true); }
-    else if (recorder.state === "paused") { recorder.resume(); setPaused(false); }
+    if (recorder.state === "recording") {
+      recorder.pause(); setPaused(true);
+      if (segmentTimerRef.current) window.clearTimeout(segmentTimerRef.current);
+    } else if (recorder.state === "paused") {
+      recorder.resume(); setPaused(false);
+      segmentTimerRef.current = window.setTimeout(() => { if (recordingWantedRef.current && recorder.state === "recording") recorder.stop(); }, SEGMENT_MS);
+    }
   }
 
   async function finishProcessing() {
     await queueRef.current;
-    const pending = [...pendingAudioRef.current.entries()].sort(([a], [b]) => a - b);
-    if (pending.length) {
+    if (pendingAudioRef.current.size) {
       setProcessing(false);
-      setError(`${pending.length} bloco(s) ainda precisam ser enviados. O áudio pendente continua temporariamente na memória deste navegador; tente novamente antes de fechar ou atualizar a página.`);
+      setError(`${pendingAudioRef.current.size} bloco(s) não foram confirmados. Os arquivos temporários permanecem neste dispositivo; tente reenviar antes de apagar os dados do navegador.`);
       return;
     }
     const ordered = [...transcriptPartsRef.current.entries()].sort(([a], [b]) => a - b);
     if (ordered.length !== segmentIndexRef.current || !ordered.length) {
-      setProcessing(false);
-      setError("A transcrição está incompleta. Verifique os blocos antes de gerar as anotações.");
-      return;
+      setProcessing(false); setError("A transcrição está incompleta. Nenhuma anotação foi gerada para evitar perda de trechos."); return;
     }
     const fullTranscript = ordered.map(([, text]) => text).join("\n\n");
-    setTranscript(fullTranscript);
-    setStatus("Organizando as anotações com Claude…");
+    setTranscript(fullTranscript); setStatus("Organizando as anotações com Claude…");
     try {
       const token = await getAccessToken();
-      const response = await fetch("/api/meeting/organize", {
-        method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: fullTranscript, prompt, pageTitle, pageContext }), cache: "no-store",
-      });
+      const response = await fetch("/api/meeting/organize", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ transcript: fullTranscript, prompt, pageTitle, pageContext }), cache: "no-store" });
       const result = await response.json() as { error?: string; summary?: string };
       if (!response.ok || !result.summary) throw new Error(result.error || "Não foi possível organizar as anotações.");
       setSummary(result.summary); setStatus("Transcrição e anotações prontas para revisão.");
-      // All segment audio has received a transcript; discard the temporary in-memory copy.
-      pendingAudioRef.current.clear();
+      const sessionId = localStorage.getItem(ACTIVE_SESSION_KEY);
+      if (sessionId) { await deleteSessionChunks(sessionId); localStorage.removeItem(ACTIVE_SESSION_KEY); }
+      setRecoverySession(null);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Ocorreu um erro ao organizar as anotações.");
-      setStatus("");
+      setError(cause instanceof Error ? cause.message : "Ocorreu um erro ao organizar as anotações."); setStatus("");
     } finally { setProcessing(false); }
   }
 
   async function stopAndProcess() {
     if (!recording || processing) return;
-    setRecording(false); setPaused(false); setProcessing(true); setError(null);
-    recordingWantedRef.current = false;
-    setStatus("Finalizando o último bloco…");
+    setRecording(false); setPaused(false); setProcessing(true); setError(null); recordingWantedRef.current = false; setStatus("Finalizando o último bloco…");
     const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      await new Promise<void>((resolve) => { stopResolverRef.current = resolve; recorder.stop(); });
-    } else {
-      streamRef.current?.getTracks().forEach((track) => track.stop()); streamRef.current = null;
-    }
-    setStatus("Transcrevendo os blocos em ordem…");
-    await finishProcessing();
+    if (recorder && recorder.state !== "inactive") await new Promise<void>((resolve) => { stopResolverRef.current = resolve; recorder.stop(); });
+    else { streamRef.current?.getTracks().forEach((track) => track.stop()); streamRef.current = null; }
+    setStatus("Transcrevendo os blocos em ordem…"); await finishProcessing();
   }
   autoStopRef.current = () => { void stopAndProcess(); };
 
@@ -226,10 +230,23 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
     if (processing || recording || !pendingAudioRef.current.size) return;
     setProcessing(true); setError(null); setStatus("Reenviando blocos pendentes…");
     const pending = [...pendingAudioRef.current.entries()].sort(([a], [b]) => a - b);
-    for (const [index, blob] of pending) {
-      queueRef.current = queueRef.current.catch(() => undefined).then(() => sendChunk(index, blob)).catch(() => undefined);
-    }
+    for (const [index, blob] of pending) queueRef.current = queueRef.current.catch(() => undefined).then(() => sendChunk(index, blob)).catch(() => undefined);
+    setRecoverySession(null);
     await finishProcessing();
+  }
+
+  async function restorePending() {
+    if (!recoverySession) return;
+    setError(null); setProcessing(true); setStatus("Recuperando blocos temporários…");
+    try {
+      const records = await listSessionChunks(recoverySession);
+      const audio = new Map<number, Blob>(); const text = new Map<number, string>();
+      records.forEach((record) => { if (record.audio) audio.set(record.index, record.audio); if (record.transcript) text.set(record.index, record.transcript); });
+      pendingAudioRef.current = audio; transcriptPartsRef.current = text; segmentIndexRef.current = Math.max(0, ...records.map((record) => record.index));
+      setChunks(records.map((record) => ({ index: record.index, status: record.transcript ? "concluído" : "falha" })));
+      if (!audio.size) { setProcessing(false); setError("Não há áudio pendente para reenviar."); return; }
+      setProcessing(false); await retryFailed();
+    } catch (cause) { setProcessing(false); setError(cause instanceof Error ? cause.message : "Não foi possível recuperar os blocos."); }
   }
 
   async function copyNotes() {
@@ -239,40 +256,36 @@ export default function InPageTranscriber({ pageTitle, pageContext, onInsert }: 
   function downloadMarkdown() {
     const content = `# ${pageTitle || "Anotações da aula"}\n\n${summary}\n\n## Transcrição\n\n${transcript}`;
     const url = URL.createObjectURL(new Blob([content], { type: "text/markdown;charset=utf-8" }));
-    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "anotacoes-aula.md"; anchor.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "anotacoes-aula.md"; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   function downloadPdf() {
     const printWindow = window.open("", "_blank");
     if (!printWindow) { setError("O navegador bloqueou a janela de impressão. Permita pop-ups para baixar em PDF."); return; }
     const escaped = summary.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char] ?? char));
-    printWindow.document.write(`<html lang="pt-BR"><head><title>Anotações</title><style>body{font:16px/1.6 system-ui;max-width:760px;margin:40px auto;white-space:pre-wrap}</style></head><body><h1>${pageTitle || "Anotações da aula"}</h1><main>${escaped}</main><script>window.print();</script></body></html>`);
-    printWindow.document.close();
+    printWindow.document.write(`<html lang="pt-BR"><head><title>Anotações</title><style>body{font:16px/1.6 system-ui;max-width:760px;margin:40px auto;white-space:pre-wrap}</style></head><body><h1>${pageTitle || "Anotações da aula"}</h1><main>${escaped}</main><script>window.print();</script></body></html>`); printWindow.document.close();
+  }
+  function replaceSelection() {
+    if (!selectedText || !onReplaceSelection) return;
+    if (!window.confirm("Substituir o trecho selecionado pelas anotações geradas? Esta ação altera o conteúdo atual da página.")) return;
+    const replaced = onReplaceSelection(summary);
+    if (!replaced) setError("Não foi possível localizar o trecho selecionado de forma segura. Selecione novamente um trecho único dentro de um parágrafo e tente outra vez.");
   }
 
   const completeCount = chunks.filter((item) => item.status === "concluído").length;
   const pendingCount = pendingAudioRef.current.size;
   return <section className="inpage-ai" aria-label="Assistente e transcrição IA">
-    <div className="inpage-ai-bar">
-      <button type="button" className="inpage-ai-search" aria-label="Abrir opções de IA" onClick={() => setPanelOpen((open) => !open)}>⌕</button>
-      <span className="inpage-ai-spark" aria-hidden="true">✦</span>
-      <input aria-label="Instrução para a inteligência artificial" placeholder="Peça à IA" value={prompt} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setPanelOpen(true)} disabled={processing || recording} />
-      <button type="button" className={recording ? "inpage-ai-mic is-recording" : "inpage-ai-mic"} aria-label={recording ? "Encerrar gravação" : "Iniciar transcrição da aula"} onClick={() => recording ? void stopAndProcess() : void startRecording()} disabled={processing || (!consent && !recording)}>{recording ? "■" : "🎙"}</button>
-    </div>
+    <div className="inpage-ai-bar"><button type="button" className="inpage-ai-search" aria-label="Abrir opções de IA" onClick={() => setPanelOpen((open) => !open)}>⌕</button><span className="inpage-ai-spark" aria-hidden="true">✦</span><input aria-label="Instrução para a inteligência artificial" placeholder="Peça à IA" value={prompt} onChange={(event) => setPrompt(event.target.value)} onFocus={() => setPanelOpen(true)} disabled={processing || recording} /><button type="button" className={recording ? "inpage-ai-mic is-recording" : "inpage-ai-mic"} aria-label={recording ? "Encerrar gravação" : "Iniciar transcrição da aula"} onClick={() => recording ? void stopAndProcess() : void startRecording()} disabled={processing || (!consent && !recording)}>{recording ? "■" : "🎙"}</button></div>
     <div className="inpage-ai-caption"><span>IA nesta página</span><button type="button" onClick={() => setPanelOpen((open) => !open)}>{panelOpen ? "Fechar" : "Transcrever aula"}</button></div>
     {panelOpen && <div className="inpage-ai-panel">
       <div className="inpage-ai-panel-head"><div><strong>Transcrição da aula</strong><p>As anotações serão preparadas para a página “{pageTitle || "Sem título"}”.</p></div><span className={recording ? "meeting-live" : "meeting-ready"}><i />{recording ? (paused ? "Pausada" : "Gravando") : processing ? "Processando" : "Pronto"}</span></div>
       <label className="meeting-consent inpage-ai-consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={recording || processing} /><span>Tenho autorização para gravar e processar as pessoas envolvidas.</span></label>
-      <div className={recording ? "inpage-ai-recorder is-recording" : "inpage-ai-recorder"}>
-        <strong className="meeting-timer">{formatTime(seconds)}</strong><span>{recording ? (paused ? "Gravação pausada" : "Gravando em segmentos automáticos de 45 segundos") : "O áudio pendente fica apenas temporariamente na memória do navegador."}</span>
-        {recording && <div className="row"><button type="button" className="secondary" onClick={togglePause}>{paused ? "Continuar" : "Pausar"}</button><button type="button" className="meeting-stop" onClick={() => void stopAndProcess()}>Encerrar e transcrever</button></div>}
-        {!recording && !processing && <button type="button" className="primary" disabled={!consent} onClick={() => void startRecording()}>Iniciar gravação</button>}
-      </div>
-      {(recording || processing || chunks.length > 0) && <div className="inpage-ai-progress" role="status"><span>{processing ? status : `${completeCount} bloco(s) transcrito(s)${recording ? " · novos blocos enviados automaticamente" : ""}`}</span>{chunks.map((chunk) => <span className={`inpage-ai-chunk ${chunk.status}`} key={chunk.index}>Bloco {chunk.index}: {chunk.status}</span>)}</div>}
+      <div className={recording ? "inpage-ai-recorder is-recording" : "inpage-ai-recorder"}><strong className="meeting-timer">{formatTime(seconds)}</strong><span>{recording ? (paused ? "Gravação pausada" : "Gravando em segmentos automáticos de 45 segundos") : "Áudio não armazenado permanentemente; blocos pendentes ficam temporariamente no dispositivo."}</span>{recording && <div className="row"><button type="button" className="secondary" onClick={togglePause}>{paused ? "Continuar" : "Pausar"}</button><button type="button" className="meeting-stop" onClick={() => void stopAndProcess()}>Encerrar e transcrever</button></div>}{!recording && !processing && <button type="button" className="primary" disabled={!consent} onClick={() => void startRecording()}>Iniciar gravação</button>}</div>
+      {(recording || processing || chunks.length > 0) && <div className="inpage-ai-progress" role="status"><span>{processing ? status : `${completeCount} bloco(s) transcrito(s)${recording ? " · envio automático" : ""}`}</span>{chunks.map((chunk) => <span className={`inpage-ai-chunk ${chunk.status}`} key={chunk.index}>Bloco {chunk.index}: {chunk.status}</span>)}</div>}
+      {recoverySession && <button type="button" className="secondary" disabled={processing} onClick={() => void restorePending()}>Recuperar blocos desta gravação</button>}
       {pendingCount > 0 && !recording && !processing && <button type="button" className="secondary" onClick={() => void retryFailed()}>Tentar novamente ({pendingCount} bloco(s) pendente(s))</button>}
       {error && <p className="notice" role="alert">{error}</p>}
-      <p className="meeting-privacy">Privacidade: os segmentos são enviados à OpenAI para transcrição e mantidos apenas temporariamente na memória deste navegador até a confirmação do texto. Após a confirmação, são descartados; não são armazenados no Supabase. O texto é enviado à Anthropic/Claude para organização. O processamento e a retenção por terceiros seguem as políticas próprias dos provedores.</p>
+      <p className="meeting-privacy">Privacidade: os segmentos são enviados à OpenAI para transcrição e ficam no armazenamento temporário local (IndexedDB) apenas até o retorno confirmado do texto. O áudio é então excluído; nenhum áudio é enviado ao Supabase. Se fechar a página, os blocos pendentes podem ser recuperados neste dispositivo. A OpenAI e a Anthropic processam dados conforme suas próprias políticas de retenção.</p>
     </div>}
-    {summary && <div className="inpage-ai-preview"><div className="inpage-ai-panel-head"><strong>Prévia das anotações</strong><span>{status}</span></div><div className="meeting-output">{summary}</div><details className="meeting-transcript"><summary>Revisar transcrição completa ({chunks.length} blocos)</summary><div className="meeting-output">{transcript}</div></details><div className="row inpage-ai-actions"><button type="button" className="primary" onClick={() => onInsert(summary)}>Inserir no final da página</button><button type="button" className="secondary" onClick={() => void copyNotes()}>{copied ? "Copiado!" : "Copiar anotações"}</button><button type="button" className="secondary" onClick={downloadMarkdown}>Baixar Markdown</button><button type="button" className="secondary" onClick={downloadPdf}>Baixar PDF</button></div><p className="meeting-hint">A inserção acrescenta as anotações ao conteúdo existente; a página e o caderno não são recriados.</p></div>}
+    {summary && <div className="inpage-ai-preview"><div className="inpage-ai-panel-head"><strong>Prévia das anotações</strong><span>{status}</span></div><div className="meeting-output">{summary}</div><details className="meeting-transcript"><summary>Revisar transcrição completa ({chunks.length} blocos)</summary><div className="meeting-output">{transcript}</div></details><div className="row inpage-ai-actions"><button type="button" className="primary" onClick={() => onInsert(summary)}>Inserir no final da página</button>{selectedText && <button type="button" className="secondary" onClick={replaceSelection}>Substituir seleção (confirmar)</button>}<button type="button" className="secondary" onClick={() => void copyNotes()}>{copied ? "Copiado!" : "Copiar anotações"}</button><button type="button" className="secondary" onClick={downloadMarkdown}>Baixar Markdown</button><button type="button" className="secondary" onClick={downloadPdf}>Baixar PDF</button></div><p className="meeting-hint">A inserção no final preserva o conteúdo anterior. A substituição exige uma confirmação explícita.</p></div>}
   </section>;
 }
