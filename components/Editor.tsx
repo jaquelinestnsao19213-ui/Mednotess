@@ -16,7 +16,7 @@ import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
-import { DOMParser as PMDOMParser } from "@tiptap/pm/html";
+import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode } from "./editor/extensions";
 import { uploadFile } from "@/lib/upload";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
@@ -67,6 +67,59 @@ const SIZES: { name: string; v: string | null }[] = [
   { name: "7", v: "28px" },
   { name: "Padrão", v: null },
 ];
+
+// Keep useful formatting from external editors while dropping unsafe content and noisy styles.
+function cleanClipboardHTML(html: string): Document {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("script, style, iframe, object, embed, link, meta, form, input, button, textarea, select, svg, math").forEach((el) => el.remove());
+
+  const allowedStyles = new Set([
+    "background-color",
+    "color",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "text-align",
+    "text-decoration",
+    "text-decoration-line",
+  ]);
+  const safeUrl = (value: string, image: boolean) => {
+    try {
+      const url = new URL(value, doc.baseURI);
+      return (url.protocol === "http:" || url.protocol === "https:" || (!image && url.protocol === "mailto:"))
+        ? url.href
+        : "";
+    } catch {
+      return "";
+    }
+  };
+
+  doc.body.querySelectorAll("*").forEach((el) => {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc" || name === "contenteditable") {
+        el.removeAttribute(attr.name);
+      } else if (name === "style") {
+        const style = (el as HTMLElement).style;
+        const kept: string[] = [];
+        for (const property of Array.from(style)) {
+          const value = style.getPropertyValue(property).trim();
+          if (allowedStyles.has(property) && value && !/url\s*\(|expression\s*\(/i.test(value)) {
+            kept.push(`${property}: ${value}`);
+          }
+        }
+        if (kept.length) el.setAttribute("style", kept.join("; "));
+        else el.removeAttribute("style");
+      } else if (name === "href" || name === "src") {
+        const url = safeUrl(attr.value, el.tagName.toLowerCase() === "img");
+        if (url) el.setAttribute(name, url);
+        else el.removeAttribute(name);
+      }
+    }
+  });
+  return doc;
+}
+
 export default function Editor({
   initial,
   onChange,
@@ -179,15 +232,15 @@ export default function Editor({
         const html = event.clipboardData?.getData("text/html");
         if (!html) return false;
 
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        if (!doc.body || !doc.body.textContent?.trim()) return false;
+        const doc = cleanClipboardHTML(html);
+        if (!doc.body.textContent?.trim() && !doc.body.querySelector("table, img, hr")) return false;
+
+        // Parse as a slice so pasted paragraphs, lists, and tables fit the current selection naturally.
+        const slice = PMDOMParser.fromSchema(view.state.schema).parseSlice(doc.body, { preserveWhitespace: true });
+        if (slice.content.size === 0) return false;
 
         event.preventDefault();
-
-        const parsed = PMDOMParser.fromSchema(view.state.schema).parse(doc);
-        if (!parsed || parsed.childCount === 0) return false;
-
-        view.dispatch(view.state.tr.replaceSelectionWith(parsed, false));
+        view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView());
         return true;
       },
       handleKeyDown: (_view, ev) => {
@@ -376,84 +429,26 @@ export default function Editor({
                   <p className="sheet-label">Personalizar bloco de destaque</p>
                   <div className="sheet-row">
                     <span className="sheet-label">Fundo:</span>
-                    {[
-                      "#fef3c7",
-                      "#dcfce7",
-                      "#dbeafe",
-                      "#fce7f3",
-                      "#ede9fe",
-                      "#fee2e2",
-                      "#f3f4f6",
-                      "#ffffff",
-                    ].map((color) => (
-                      <button
-                        type="button"
-                        key={color}
-                        aria-label={`Fundo ${color}`}
-                        className="swatch"
-                        style={{ background: color }}
-                        onClick={() =>
-                          chain().updateAttributes("callout", {
-                            backgroundColor: color,
-                          }).run()
-                        }
-                      />
+                    {["#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#ede9fe", "#fee2e2", "#f3f4f6", "#ffffff"].map((color) => (
+                      <button type="button" key={color} aria-label={`Fundo ${color}`} className="swatch" style={{ background: color }} onClick={() => chain().updateAttributes("callout", { backgroundColor: color }).run()} />
                     ))}
                     {chip("Personalizada", () => {
-                      const color = window.prompt(
-                        "Digite a cor de fundo em hexadecimal:",
-                        "#fff3cd"
-                      );
-                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) {
-                        chain().updateAttributes("callout", {
-                          backgroundColor: color,
-                        }).run();
-                      }
+                      const color = window.prompt("Digite a cor de fundo em hexadecimal:", "#fff3cd");
+                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) chain().updateAttributes("callout", { backgroundColor: color }).run();
                     })}
                   </div>
                   <div className="sheet-row">
                     <span className="sheet-label">Texto:</span>
-                    {[
-                      "#1b2430",
-                      "#991b1b",
-                      "#166534",
-                      "#1d4ed8",
-                      "#6b21a8",
-                      "#9d174d",
-                      "#ffffff",
-                    ].map((color) => (
-                      <button
-                        type="button"
-                        key={color}
-                        aria-label={`Texto ${color}`}
-                        className="swatch"
-                        style={{ background: color }}
-                        onClick={() =>
-                          chain().updateAttributes("callout", {
-                            textColor: color,
-                          }).run()
-                        }
-                      />
+                    {["#1b2430", "#991b1b", "#166534", "#1d4ed8", "#6b21a8", "#9d174d", "#ffffff"].map((color) => (
+                      <button type="button" key={color} aria-label={`Texto ${color}`} className="swatch" style={{ background: color }} onClick={() => chain().updateAttributes("callout", { textColor: color }).run()} />
                     ))}
                     {chip("Personalizada", () => {
-                      const color = window.prompt(
-                        "Digite a cor do texto em hexadecimal:",
-                        "#1b2430"
-                      );
-                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) {
-                        chain().updateAttributes("callout", {
-                          textColor: color,
-                        }).run();
-                      }
+                      const color = window.prompt("Digite a cor do texto em hexadecimal:", "#1b2430");
+                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) chain().updateAttributes("callout", { textColor: color }).run();
                     })}
                   </div>
                   <div className="sheet-row">
-                    {chip("Restaurar cores", () =>
-                      chain().updateAttributes("callout", {
-                        backgroundColor: null,
-                        textColor: null,
-                      }).run()
-                    )}
+                    {chip("Restaurar cores", () => chain().updateAttributes("callout", { backgroundColor: null, textColor: null }).run())}
                   </div>
                 </>
               )}
