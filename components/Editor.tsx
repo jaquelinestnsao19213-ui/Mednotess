@@ -57,12 +57,15 @@ const MARKERS = [
   { name: "Roxo", v: "#e9d5ff" },
 ];
 const SIZES: { name: string; v: string | null }[] = [
-  { name: "Pequeno", v: "0.85em" },
-  { name: "Normal", v: null },
-  { name: "Grande", v: "1.3em" },
-  { name: "Enorme", v: "1.75em" },
+  { name: "1", v: "12px" },
+  { name: "2", v: "14px" },
+  { name: "3", v: "16px" },
+  { name: "4", v: "18px" },
+  { name: "5", v: "20px" },
+  { name: "6", v: "24px" },
+  { name: "7", v: "28px" },
+  { name: "Padrão", v: null },
 ];
-
 export default function Editor({
   initial,
   onChange,
@@ -305,11 +308,40 @@ export default function Editor({
                 {chip("Direita", () => chain().setTextAlign("right").run(), editor.isActive({ textAlign: "right" }))}
                 {chip("Justificado", () => chain().setTextAlign("justify").run(), editor.isActive({ textAlign: "justify" }))}
               </div>
-              <div className="sheet-row">
-                {SIZES.map((s) =>
-                  chip(s.name, () => (s.v ? chain().setFontSize(s.v).run() : chain().unsetFontSize().run()), s.v ? editor.isActive("textStyle", { fontSize: s.v }) : false, `Tamanho ${s.name}`)
-                )}
-              </div>
+             <p className="sheet-label">Tamanho da fonte</p>
+
+<div className="sheet-row">
+  {SIZES.map((s) =>
+    chip(
+      s.name,
+      () => (
+        s.v
+          ? chain().setFontSize(s.v).run()
+          : chain().unsetFontSize().run()
+      ),
+      s.v ? editor.isActive("textStyle", { fontSize: s.v }) : false,
+      `Tamanho ${s.name}`
+    )
+  )}
+
+  {chip("Personalizado", () => {
+    const value = window.prompt(
+      "Digite o tamanho da fonte em pixels:",
+      "22"
+    );
+
+    if (value === null) return;
+
+    const size = Number(value);
+
+    if (!Number.isFinite(size) || size < 6 || size > 100) {
+      window.alert("Digite um tamanho entre 6 e 100 pixels.");
+      return;
+    }
+
+    chain().setFontSize(`${size}px`).run();
+  })}
+</div>
               <p className="sheet-label">Cor do texto</p>
               <div className="sheet-row">
                 {TEXT_COLORS.map((c) => (
