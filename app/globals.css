@@ -94,15 +94,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .cover-actions .secondary { background: var(--surface); }
 .titlebar {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   margin: 20px 0 12px;
   width: 100%;
 }
 
+.titlebar .icon-btn {
+  flex: 0 0 auto;
+  font-size: 1.5rem;
+  padding: 4px;
+}
+
 .titlebar .title-input {
-  width: 100%;
+  flex: 0 1 75%;
+  width: 75%;
   min-width: 0;
   text-align: center;
   font-size: clamp(1.7rem, 5vw, 2.4rem);
@@ -112,10 +120,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .cover ~ .titlebar {
   margin-top: 20px;
   padding-left: 0;
-}
-
-.titlebar .icon-btn {
-  font-size: 2rem;
 }
 .props { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 8px 0 18px; }
 .props label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
