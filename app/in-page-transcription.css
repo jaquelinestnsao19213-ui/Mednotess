@@ -1,0 +1,35 @@
+.inpage-ai { display: grid; gap: 7px; margin: 14px 0 22px; }
+.inpage-ai-bar { display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); box-shadow: 0 5px 18px rgb(30 55 75 / 0.045); }
+.inpage-ai-search, .inpage-ai-mic { display: grid; place-items: center; flex: 0 0 42px; width: 42px; height: 42px; padding: 0; border-radius: 50%; background: transparent; color: var(--ink); border: 1px solid var(--line); font-size: 1.15rem; }
+.inpage-ai-spark { color: var(--accent); font-size: 1.2rem; }
+.inpage-ai-bar input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 1rem; }
+.inpage-ai-bar input:focus-visible { outline: none; }
+.inpage-ai-bar input::placeholder { color: var(--muted); opacity: .8; }
+.inpage-ai-mic { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.inpage-ai-mic.is-recording { background: #b42318; border-color: #b42318; color: white; animation: meeting-pulse 1s infinite; }
+.inpage-ai-caption { display: flex; justify-content: space-between; align-items: center; padding: 0 12px; color: var(--muted); font-size: .78rem; }
+.inpage-ai-caption button { padding: 2px 6px; background: transparent; border: 0; color: var(--accent); font-size: .78rem; }
+.inpage-ai-panel, .inpage-ai-preview { display: grid; gap: 13px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.inpage-ai-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.inpage-ai-panel-head p { margin: 3px 0 0; color: var(--muted); font-size: .85rem; }
+.inpage-ai-consent { margin: 0; }
+.inpage-ai-recorder { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px; border-radius: 10px; background: var(--bg); color: var(--muted); font-size: .84rem; }
+.inpage-ai-recorder .meeting-timer { color: var(--ink); font-size: 1.25rem; }
+.inpage-ai-recorder .row { margin-left: auto; }
+.inpage-ai-recorder.is-recording { border: 1px solid color-mix(in srgb, #d92d20 35%, var(--line)); }
+.inpage-ai-progress { display: grid; gap: 6px; color: var(--muted); font-size: .82rem; }
+.inpage-ai-chunk { padding: 5px 8px; border-radius: 6px; background: var(--bg); }
+.inpage-ai-chunk.concluído { color: #067647; }
+.inpage-ai-chunk.falha { color: #b42318; }
+.inpage-ai-preview .meeting-output { max-height: 55vh; overflow: auto; }
+.inpage-ai-actions { gap: 7px; }
+.inpage-ai-actions button { padding: 8px 10px; font-size: .84rem; }
+@media (max-width: 560px) {
+  .inpage-ai-bar { min-height: 54px; gap: 7px; }
+  .inpage-ai-search, .inpage-ai-mic { flex-basis: 38px; width: 38px; height: 38px; }
+  .inpage-ai-panel, .inpage-ai-preview { padding: 13px; }
+  .inpage-ai-recorder { align-items: flex-start; }
+  .inpage-ai-recorder > span { flex-basis: 100%; }
+  .inpage-ai-recorder .row { margin-left: 0; }
+  .inpage-ai-actions button { flex: 1 1 44%; }
+}
