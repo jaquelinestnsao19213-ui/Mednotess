@@ -10,10 +10,53 @@ import { uploadFile } from "@/lib/upload";
 import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
 import type { PageRow } from "@/lib/types";
 import PageAssistant from "@/components/PageAssistant";
+import InPageTranscriber from "@/components/InPageTranscriber";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
-
 type Crumb = { id: string; title: string };
+
+function contentText(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const node = value as { text?: unknown; content?: unknown };
+  const own = typeof node.text === "string" ? node.text : "";
+  const children = Array.isArray(node.content) ? node.content.map(contentText).join(" ") : "";
+  return [own, children].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function markdownBlocks(markdown: string): JSONContent[] {
+  const result: JSONContent[] = [];
+  let listType: "bulletList" | "orderedList" | null = null;
+  let listItems: JSONContent[] = [];
+  const flushList = () => {
+    if (listType && listItems.length) result.push({ type: listType, content: listItems });
+    listType = null;
+    listItems = [];
+  };
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { flushList(); continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      result.push({ type: "heading", attrs: { level: heading[1].length }, content: [{ type: "text", text: heading[2] }] });
+      continue;
+    }
+    const bullet = line.match(/^[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+    const itemText = bullet?.[1] ?? ordered?.[1];
+    if (itemText) {
+      const nextType = bullet ? "bulletList" : "orderedList";
+      if (listType !== nextType) flushList();
+      listType = nextType;
+      listItems.push({ type: "listItem", content: [{ type: "paragraph", content: [{ type: "text", text: itemText.replace(/\*\*(.*?)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1") }] }] });
+      continue;
+    }
+    flushList();
+    result.push({ type: "paragraph", content: [{ type: "text", text: line.replace(/\*\*(.*?)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1") }] });
+  }
+  flushList();
+  return result;
+}
 
 export default function PageRoute() {
   const { id } = useParams<{ id: string }>();
@@ -29,7 +72,6 @@ function PageView({ id }: { id: string }) {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editorVersion, setEditorVersion] = useState(0);
-
   const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const coverInput = useRef<HTMLInputElement>(null);
@@ -37,44 +79,35 @@ function PageView({ id }: { id: string }) {
   async function flush() {
     const patch = pending.current;
     pending.current = {};
-    if (Object.keys(patch).length === 0) return;
+    if (!Object.keys(patch).length) return;
     const { error } = await supabase.from("pages").update(patch).eq("id", id);
     setError(error ? "Não foi possível salvar. Tente de novo." : null);
     setStatus("saved");
   }
   const flushRef = useRef(flush);
   flushRef.current = flush;
-
   function save(patch: Record<string, unknown>) {
     pending.current = { ...pending.current, ...patch };
     setStatus("saving");
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => flushRef.current(), 800);
   }
-
   function update(patch: Partial<PageRow>) {
-    setPage((p) => (p ? { ...p, ...patch } : p));
+    setPage((current) => current ? { ...current, ...patch } : current);
     save(patch);
   }
-
   function insertAssistantText(text: string) {
     if (!page) return;
     const doc = toDoc(page.content);
-    const paragraphs: JSONContent[] = text.split(/\n+/).map((line) => ({
-      type: "paragraph",
-      content: line.trim() ? [{ type: "text", text: line.trim() }] : [],
-    }));
-    const content = [...(doc.content ?? []), ...paragraphs];
-    const next = { ...doc, content };
+    const additions = markdownBlocks(text);
+    const next = { ...doc, content: [...(doc.content ?? []), ...additions] };
     setPage((current) => current ? { ...current, content: next } : current);
     save({ content: next });
     setEditorVersion((version) => version + 1);
   }
 
   useEffect(() => {
-    const onHide = () => {
-      if (document.visibilityState === "hidden") flushRef.current();
-    };
+    const onHide = () => { if (document.visibilityState === "hidden") flushRef.current(); };
     document.addEventListener("visibilitychange", onHide);
     window.addEventListener("pagehide", onHide);
     return () => {
@@ -86,20 +119,15 @@ function PageView({ id }: { id: string }) {
   }, []);
 
   useEffect(() => {
+    let alive = true;
     (async () => {
       const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
+      if (!alive) return;
       if (!row) return setNotFound(true);
       const current = row as PageRow;
       setPage(current);
-
-      const { data: kids } = await supabase
-        .from("pages")
-        .select("*")
-        .eq("parent_id", id)
-        .order("position")
-        .order("created_at");
-      setChildren((kids ?? []) as PageRow[]);
-
+      const { data: kids } = await supabase.from("pages").select("*").eq("parent_id", id).order("position").order("created_at");
+      if (alive) setChildren((kids ?? []) as PageRow[]);
       const trail: Crumb[] = [];
       let parent = current.parent_id;
       for (let i = 0; i < 10 && parent; i++) {
@@ -108,190 +136,62 @@ function PageView({ id }: { id: string }) {
         trail.unshift({ id: p.id, title: p.title });
         parent = p.parent_id;
       }
-      setCrumbs(trail);
+      if (alive) setCrumbs(trail);
     })();
+    return () => { alive = false; };
   }, [id]);
 
   async function addChild(kind: "lesson" | "page") {
-    const row =
-      kind === "lesson"
-        ? { title: "Nova aula / tema", type: "lesson", content: LESSON_TEMPLATE }
-        : { title: "Nova página", type: "page" };
-    const { data, error } = await supabase
-      .from("pages")
-      .insert({ ...row, parent_id: id })
-      .select("id")
-      .single();
+    const row = kind === "lesson" ? { title: "Nova aula / tema", type: "lesson", content: LESSON_TEMPLATE } : { title: "Nova página", type: "page" };
+    const { data, error } = await supabase.from("pages").insert({ ...row, parent_id: id }).select("id").single();
     if (error || !data) return setError("Não foi possível criar a página.");
     router.push(`/p/${data.id}`);
   }
-
   async function updateChild(childId: string, patch: Partial<PageRow>) {
     const { error } = await supabase.from("pages").update(patch).eq("id", childId);
     if (error) setError("Não foi possível salvar a alteração na tabela.");
   }
-
   function editChildLocal(childId: string, patch: Partial<PageRow>) {
-    setChildren((list) => list.map((c) => (c.id === childId ? { ...c, ...patch } : c)));
+    setChildren((list) => list.map((child) => child.id === childId ? { ...child, ...patch } : child));
   }
-
   async function onCover(file: File | undefined) {
     if (!file) return;
-    try {
-      update({ cover_url: await uploadFile(file) });
-    } catch {
-      setError("Não foi possível enviar a capa. Confira se rodou o schema2.sql no Supabase.");
-    }
+    try { update({ cover_url: await uploadFile(file) }); }
+    catch { setError("Não foi possível enviar a capa. Confira se rodou o schema2.sql no Supabase."); }
   }
-
   async function remove() {
     if (!page) return;
-    const ok = window.confirm(
-      children.length > 0
-        ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito."
-        : "Excluir esta página? Isso não pode ser desfeito."
-    );
+    const ok = window.confirm(children.length ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito." : "Excluir esta página? Isso não pode ser desfeito.");
     if (!ok) return;
     pending.current = {};
     const { error } = await supabase.from("pages").delete().eq("id", id);
     if (error) return setError("Não foi possível excluir.");
     router.push(page.parent_id ? `/p/${page.parent_id}` : "/");
   }
-
   if (notFound) return <p className="empty">Página não encontrada. <Link href="/">Voltar ao início</Link></p>;
   if (!page) return <p className="muted">Carregando…</p>;
-
   const isLesson = page.type === "lesson";
 
-  const table = (
-    <section className="subpages">
-      <div className="head">
-        <h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2>
-        <div className="row">
-          <button className="primary" onClick={() => addChild("lesson")}>Nova aula</button>
-          <button className="secondary" onClick={() => addChild("page")}>Nova página</button>
-        </div>
-      </div>
-      {children.length === 0 ? (
-        <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr><th>Aula / tema</th><th>Data</th><th></th></tr>
-            </thead>
-            <tbody>
-              {children.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <input
-                      value={c.title}
-                      aria-label="Título"
-                      onChange={(e) => editChildLocal(c.id, { title: e.target.value })}
-                      onBlur={(e) => updateChild(c.id, { title: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="date"
-                      value={c.props?.date ?? ""}
-                      aria-label="Data"
-                      onChange={(e) => {
-                        const props = { ...c.props, date: e.target.value };
-                        editChildLocal(c.id, { props });
-                        updateChild(c.id, { props });
-                      }}
-                    />
-                  </td>
-                  <td><Link className="open" href={`/p/${c.id}`}>Abrir</Link></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
+  const table = <section className="subpages">
+    <div className="head"><h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2><div className="row"><button className="primary" onClick={() => addChild("lesson")}>Nova aula</button><button className="secondary" onClick={() => addChild("page")}>Nova página</button></div></div>
+    {!children.length ? <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p> : <div className="table-wrap"><table className="data"><thead><tr><th>Aula / tema</th><th>Data</th><th></th></tr></thead><tbody>{children.map((child) => <tr key={child.id}><td><input value={child.title} aria-label="Título" onChange={(event) => editChildLocal(child.id, { title: event.target.value })} onBlur={(event) => updateChild(child.id, { title: event.target.value })} /></td><td><input type="date" value={child.props?.date ?? ""} aria-label="Data" onChange={(event) => { const props = { ...child.props, date: event.target.value }; editChildLocal(child.id, { props }); updateChild(child.id, { props }); }} /></td><td><Link className="open" href={`/p/${child.id}`}>Abrir</Link></td></tr>)}</tbody></table></div>}
+  </section>;
 
-    const editor = (
-    <Editor 
-      key={`${page.id}-${editorVersion}`} 
-      initial={toDoc(page.content)} 
-      onChange={(doc: JSONContent) => {
-        // Atualiza o estado da página local imediatamente para o PageAssistant receber o texto novo
-        setPage((current) => current ? { ...current, content: doc } : current);
-        // Mantém a função de salvamento com a lógica de espera (debounce) para o banco de dados
-        save({ content: doc });
-      }} 
-    />
-  );
+  const editor = <Editor key={`${page.id}-${editorVersion}`} initial={toDoc(page.content)} onChange={(doc: JSONContent) => {
+    setPage((current) => current ? { ...current, content: doc } : current);
+    save({ content: doc });
+  }} />;
+  const transcriber = <InPageTranscriber pageTitle={page.title} pageContext={contentText(toDoc(page.content))} onInsert={insertAssistantText} />;
 
-  return (
-    <>
-      <nav className="crumbs" aria-label="Caminho">
-        <Link href="/">Início</Link>
-        {crumbs.map((c) => (
-          <span key={c.id}>
-            <span className="sep">/</span>
-            <Link href={`/p/${c.id}`}>{c.title || "Sem título"}</Link>
-          </span>
-        ))}
-      </nav>
-
-      {page.cover_url ? (
-        <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }}>
-          <div className="cover-actions">
-            <button className="secondary" onClick={() => coverInput.current?.click()}>Trocar capa</button>
-            <button className="secondary" onClick={() => update({ cover_url: null })}>Remover</button>
-          </div>
-        </div>
-      ) : (
-        <button className="secondary small-btn" onClick={() => coverInput.current?.click()}>Adicionar capa</button>
-      )}
-      <input ref={coverInput} type="file" accept="image/*" hidden onChange={(e) => { onCover(e.target.files?.[0]); e.target.value = ""; }} />
-
-      <div className="titlebar">
-  {page.icon && (
-    <button
-      className="icon-btn"
-      aria-label="Trocar ícone"
-      onClick={() => {
-        const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
-        if (v !== null) update({ icon: v.trim() || null });
-      }}
-    >
-      {page.icon}
-    </button>
-  )}
-
-  <input
-    className="title-input display"
-    value={page.title}
-    placeholder="Sem título"
-    onChange={(e) => update({ title: e.target.value })}
-    aria-label="Título da página"
-  />
-</div>
-      <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
-      {error && <p className="notice">{error}</p>}
-
-      {isLesson && (
-        <div className="props">
-          <label>Data
-            <input type="date" value={page.props?.date ?? ""} onChange={(e) => update({ props: { ...page.props, date: e.target.value } })} />
-          </label>
-          <label>Disciplina
-            <input value={page.props?.discipline ?? ""} placeholder="Ex.: Tutoria" onChange={(e) => update({ props: { ...page.props, discipline: e.target.value } })} />
-          </label>
-          <label>Sala
-            <input value={page.props?.room ?? ""} placeholder="Ex.: 314 — Bloco D" onChange={(e) => update({ props: { ...page.props, room: e.target.value } })} />
-          </label>
-        </div>
-      )}
-
-      {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
-      <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
-      <button className="danger" onClick={remove}>Excluir página</button>
-    </>
-  );
+  return <>
+    <nav className="crumbs" aria-label="Caminho"><Link href="/">Início</Link>{crumbs.map((crumb) => <span key={crumb.id}><span className="sep">/</span><Link href={`/p/${crumb.id}`}>{crumb.title || "Sem título"}</Link></span>)}</nav>
+    {page.cover_url ? <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }}><div className="cover-actions"><button className="secondary" onClick={() => coverInput.current?.click()}>Trocar capa</button><button className="secondary" onClick={() => update({ cover_url: null })}>Remover</button></div></div> : <button className="secondary small-btn" onClick={() => coverInput.current?.click()}>Adicionar capa</button>}
+    <input ref={coverInput} type="file" accept="image/*" hidden onChange={(event) => { void onCover(event.target.files?.[0]); event.target.value = ""; }} />
+    <div className="titlebar">{page.icon && <button className="icon-btn" aria-label="Trocar ícone" onClick={() => { const value = window.prompt("Digite um emoji para o ícone", page.icon ?? ""); if (value !== null) update({ icon: value.trim() || null }); }}>{page.icon}</button>}<input className="title-input display" value={page.title} placeholder="Sem título" onChange={(event) => update({ title: event.target.value })} aria-label="Título da página" /></div>
+    <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>{error && <p className="notice">{error}</p>}
+    {isLesson && <div className="props"><label>Data<input type="date" value={page.props?.date ?? ""} onChange={(event) => update({ props: { ...page.props, date: event.target.value } })} /></label><label>Disciplina<input value={page.props?.discipline ?? ""} placeholder="Ex.: Tutoria" onChange={(event) => update({ props: { ...page.props, discipline: event.target.value } })} /></label><label>Sala<input value={page.props?.room ?? ""} placeholder="Ex.: 314 — Bloco D" onChange={(event) => update({ props: { ...page.props, room: event.target.value } })} /></label></div>}
+    {isLesson ? <>{transcriber}{editor}{table}</> : <>{table}{transcriber}{editor}</>}
+    <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
+    <button className="danger" onClick={() => void remove()}>Excluir página</button>
+  </>;
 }
