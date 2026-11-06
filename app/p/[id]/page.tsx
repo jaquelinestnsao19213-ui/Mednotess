@@ -9,6 +9,7 @@ import { supabase } from "@/lib/supabase";
 import { uploadFile } from "@/lib/upload";
 import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
 import type { PageRow } from "@/lib/types";
+import PageAssistant from "@/components/PageAssistant";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
@@ -27,6 +28,7 @@ function PageView({ id }: { id: string }) {
   const [status, setStatus] = useState<"saved" | "saving">("saved");
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editorVersion, setEditorVersion] = useState(0);
 
   const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -53,6 +55,20 @@ function PageView({ id }: { id: string }) {
   function update(patch: Partial<PageRow>) {
     setPage((p) => (p ? { ...p, ...patch } : p));
     save(patch);
+  }
+
+  function insertAssistantText(text: string) {
+    if (!page) return;
+    const doc = toDoc(page.content);
+    const paragraphs: JSONContent[] = text.split(/\n+/).map((line) => ({
+      type: "paragraph",
+      content: line.trim() ? [{ type: "text", text: line.trim() }] : [],
+    }));
+    const content = [...(doc.content ?? []), ...paragraphs];
+    const next = { ...doc, content };
+    setPage((current) => current ? { ...current, content: next } : current);
+    save({ content: next });
+    setEditorVersion((version) => version + 1);
   }
 
   useEffect(() => {
@@ -198,7 +214,7 @@ function PageView({ id }: { id: string }) {
   );
 
   const editor = (
-    <Editor key={page.id} initial={toDoc(page.content)} onChange={(doc: JSONContent) => save({ content: doc })} />
+    <Editor key={`${page.id}-${editorVersion}`} initial={toDoc(page.content)} onChange={(doc: JSONContent) => save({ content: doc })} />
   );
 
   return (
@@ -262,7 +278,7 @@ function PageView({ id }: { id: string }) {
       )}
 
       {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
-
+      <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
       <button className="danger" onClick={remove}>Excluir página</button>
     </>
   );
