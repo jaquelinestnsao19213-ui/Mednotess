@@ -78,15 +78,37 @@ export const Callout = Node.create({
         rendered: false,
         parseHTML: (el: HTMLElement) => el.getAttribute("data-icon") ?? "💡",
       },
+      backgroundColor: {
+        default: null,
+        parseHTML: (el: HTMLElement) => el.style.backgroundColor || null,
+      },
+      textColor: {
+        default: null,
+        parseHTML: (el: HTMLElement) => el.style.color || null,
+      },
     };
   },
   parseHTML() {
     return [{ tag: "div[data-callout]", contentElement: ".callout-body" }];
   },
   renderHTML({ node, HTMLAttributes }) {
+    const styles = [
+      node.attrs.backgroundColor
+        ? `background-color: ${node.attrs.backgroundColor}`
+        : "",
+      node.attrs.textColor
+        ? `color: ${node.attrs.textColor}`
+        : "",
+    ].filter(Boolean).join("; ");
+
     return [
       "div",
-      mergeAttributes(HTMLAttributes, { "data-callout": "", "data-icon": node.attrs.icon, class: "callout" }),
+      mergeAttributes(HTMLAttributes, {
+        "data-callout": "",
+        "data-icon": node.attrs.icon,
+        class: "callout",
+        style: styles || null,
+      }),
       ["div", { class: "callout-body" }, 0],
     ];
   },
