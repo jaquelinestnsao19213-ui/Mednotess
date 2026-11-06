@@ -250,18 +250,18 @@ function PageView({ id }: { id: string }) {
       )}
       <input ref={coverInput} type="file" accept="image/*" hidden onChange={(e) => { onCover(e.target.files?.[0]); e.target.value = ""; }} />
 
-      <div className="titlebar">
-        <button
-          className="icon-btn"
-          aria-label="Trocar ícone"
-          onClick={() => {
-            const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
-            if (v !== null) update({ icon: v.trim() || null });
-          }}
-        >
-          {page.icon || "＋"}
-        </button>
-        <input
+      {page.icon && (
+  <button
+    className="icon-btn"
+    aria-label="Trocar ícone"
+    onClick={() => {
+      const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
+      if (v !== null) update({ icon: v.trim() || null });
+    }}
+  >
+    {page.icon}
+  </button>
+)}
           className="title-input display"
           value={page.title}
           placeholder="Sem título"
