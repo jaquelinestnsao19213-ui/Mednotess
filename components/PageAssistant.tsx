@@ -60,7 +60,7 @@ export default function PageAssistant({
       });
       const result = await response.json() as { message?: string; insertText?: string | null; error?: string };
       if (!response.ok || !result.message) throw new Error(result.error ?? "Não foi possível enviar a mensagem.");
-      setMessages((current) => [...current, { role: "assistant", content: result.message!, insertText: result.insertText ?? null }].slice(-12));
+      setMessages((current) => [...current, { role: "assistant" as const, content: result.message!, insertText: result.insertText ?? null }].slice(-12));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Ocorreu um erro. Tente novamente.");
     } finally {
