@@ -16,6 +16,7 @@ import TableCell from "@tiptap/extension-table-cell";
 import TableHeader from "@tiptap/extension-table-header";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
+import { DOMParser as PMDOMParser } from "@tiptap/pm/html";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode } from "./editor/extensions";
 import { uploadFile } from "@/lib/upload";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
@@ -174,6 +175,21 @@ export default function Editor({
     },
     editorProps: {
       attributes: { spellcheck: "true", "aria-label": "Página" },
+      handlePaste: (view, event) => {
+        const html = event.clipboardData?.getData("text/html");
+        if (!html) return false;
+
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        if (!doc.body || !doc.body.textContent?.trim()) return false;
+
+        event.preventDefault();
+
+        const parsed = PMDOMParser.fromSchema(view.state.schema).parse(doc);
+        if (!parsed || parsed.childCount === 0) return false;
+
+        view.dispatch(view.state.tr.replaceSelectionWith(parsed, false));
+        return true;
+      },
       handleKeyDown: (_view, ev) => {
         const s = slashRef.current;
         if (!s) return false;
