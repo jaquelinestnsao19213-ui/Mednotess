@@ -42,3 +42,14 @@ export type StudyTask = {
   completed: boolean;
   created_at: string;
 };
+
+export type ResourceLink = {
+  id: string;
+  user_id: string;
+  provider: "drive" | "canva";
+  title: string;
+  url: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+};
