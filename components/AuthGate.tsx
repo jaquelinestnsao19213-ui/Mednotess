@@ -5,11 +5,11 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
+import ResourceLibrary from "@/components/ResourceLibrary";
 
 const NAV = [
   { href: "/", label: "Início" },
   { href: "/disciplinas", label: "Disciplinas" },
-  { href: "/planejamento", label: "Planejamento" },
   { href: "/cadernos", label: "Cadernos" },
 ];
 
@@ -33,8 +33,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   return (
     <>
       <header className="topbar">
-        <Link href="/" className="brand"><span className="brand-mark" aria-hidden="true">✳</span> Meu espaço</Link>
-        <button className="link-button signout-button" onClick={() => supabase.auth.signOut()}>
+        <Link href="/" className="brand">Meus cadernos</Link>
+        <button className="link-button" onClick={() => supabase.auth.signOut()}>
           Sair
         </button>
       </header>
@@ -48,7 +48,10 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
           );
         })}
       </nav>
-      <main className="shell">{children}</main>
+      <main className="shell">
+        {children}
+        {pathname === "/" && <ResourceLibrary />}
+      </main>
     </>
   );
 }
@@ -78,7 +81,7 @@ function LoginForm() {
 
   return (
     <main className="shell login">
-      <h1 className="display">Meu espaço</h1>
+      <h1 className="display">Meus cadernos</h1>
       <p className="muted">Entre para ver suas aulas, resumos e diário.</p>
       <label>
         E-mail
