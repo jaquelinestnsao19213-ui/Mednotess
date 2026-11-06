@@ -2,10 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import HomeChat from "@/components/HomeChat";
 import { supabase } from "@/lib/supabase";
 import type { PageRow, StudyTask, Subject } from "@/lib/types";
-
-const WEEKDAYS = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"];
 
 function dateKey(date: Date) {
   const year = date.getFullYear();
@@ -60,11 +59,12 @@ export default function Dashboard() {
           <span className="eyebrow">SEU ESPAÇO DE APRENDIZAGEM</span>
           <h1 className="display">Estude com mais clareza.</h1>
           <p>Suas anotações, disciplinas e planos de estudo em um só lugar.</p>
-          <Link className="welcome-action" href="/planejamento">Organizar minha semana <span aria-hidden>→</span></Link>
+          <Link className="welcome-action" href="/planejamento">Organizar minha semana <span aria-hidden="true">→</span></Link>
         </div>
         <div className="welcome-art" aria-hidden="true"><span>✦</span><i>✎</i><b>◷</b></div>
       </section>
 
+      <HomeChat />
       {error && <p className="notice">{error}</p>}
 
       <section className="workspace-section" aria-labelledby="workspace-title">
@@ -75,22 +75,22 @@ export default function Dashboard() {
         <div className="workspace-grid">
           <Link href="/cadernos" className="workspace-card workspace-notes">
             <span className="workspace-icon" aria-hidden="true">▤</span><span className="workspace-label">ANOTAÇÕES</span>
-            <strong>Cadernos</strong><span>Matérias, aulas e resumos em um só lugar.</span><span className="workspace-link">Abrir cadernos <b aria-hidden>↗</b></span>
+            <strong>Cadernos</strong><span>Matérias, aulas e resumos em um só lugar.</span><span className="workspace-link">Abrir cadernos <b aria-hidden="true">↗</b></span>
           </Link>
           <Link href="/disciplinas" className="workspace-card workspace-subjects">
             <span className="workspace-icon" aria-hidden="true">✳</span><span className="workspace-label">SEU CONTEÚDO</span>
-            <strong>Disciplinas</strong><span>Organize temas e acesse cada caderno.</span><span className="workspace-link">Ver disciplinas <b aria-hidden>↗</b></span>
+            <strong>Disciplinas</strong><span>Organize temas e acesse cada caderno.</span><span className="workspace-link">Ver disciplinas <b aria-hidden="true">↗</b></span>
           </Link>
           <Link href="/planejamento" className="workspace-card workspace-planner">
             <span className="workspace-icon" aria-hidden="true">▦</span><span className="workspace-label">PRÓXIMOS PASSOS</span>
-            <strong>Planejamento semanal</strong><span>Transforme seus objetivos em uma rotina possível.</span><span className="workspace-link">Planejar estudos <b aria-hidden>↗</b></span>
+            <strong>Planejamento semanal</strong><span>Transforme seus objetivos em uma rotina possível.</span><span className="workspace-link">Planejar estudos <b aria-hidden="true">↗</b></span>
           </Link>
         </div>
       </section>
 
       <section className="dashboard-lower">
         <div className="today-panel">
-          <div className="section-heading compact-heading"><div><span className="eyebrow">SEU DIA</span><h2>Hoje</h2></div><Link href="/planejamento" className="text-link">Ver semana <span aria-hidden>→</span></Link></div>
+          <div className="section-heading compact-heading"><div><span className="eyebrow">SEU DIA</span><h2>Hoje</h2></div><Link href="/planejamento" className="text-link">Ver semana <span aria-hidden="true">→</span></Link></div>
           {todaysTasks.length ? (
             <ul className="today-list">
               {todaysTasks.slice(0, 4).map((task) => (
@@ -111,14 +111,14 @@ export default function Dashboard() {
           <div className="progress-number"><strong>{done}</strong><span>de {tasks.length} atividades concluídas</span></div>
           <div className="progress-track" role="progressbar" aria-label="Progresso das atividades nesta semana" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${progress}%` }} /></div>
           <p>{tasks.length ? `${progress}% da sua semana de estudos concluída` : "Seu progresso aparece aqui quando planejar atividades."}</p>
-          <Link href="/planejamento" className="progress-link">Acompanhar planejamento <span aria-hidden>→</span></Link>
+          <Link href="/planejamento" className="progress-link">Acompanhar planejamento <span aria-hidden="true">→</span></Link>
         </aside>
       </section>
 
       {subjects?.length ? (
         <section className="subject-shortcuts">
-          <div className="section-heading compact-heading"><div><span className="eyebrow">SEUS TEMAS</span><h2>Continue de onde parou</h2></div><Link href="/disciplinas" className="text-link">Todas <span aria-hidden>→</span></Link></div>
-          <div className="subject-shortcut-list">{subjects.slice(0, 4).map((subject) => <Link key={subject.id} href={subject.notebook_page_id ? `/p/${subject.notebook_page_id}` : `/disciplinas/${subject.id}`}><span className="shortcut-icon" style={{ ["--shortcut-color" as string]: subject.color }} aria-hidden>{subject.icon || "✳"}</span><strong>{subject.name}</strong><span aria-hidden>↗</span></Link>)}</div>
+          <div className="section-heading compact-heading"><div><span className="eyebrow">SEUS TEMAS</span><h2>Continue de onde parou</h2></div><Link href="/disciplinas" className="text-link">Todas <span aria-hidden="true">→</span></Link></div>
+          <div className="subject-shortcut-list">{subjects.slice(0, 4).map((subject) => <Link key={subject.id} href={subject.notebook_page_id ? `/p/${subject.notebook_page_id}` : `/disciplinas/${subject.id}`}><span className="shortcut-icon" style={{ ["--shortcut-color" as string]: subject.color }} aria-hidden="true">{subject.icon || "✳"}</span><strong>{subject.name}</strong><span aria-hidden="true">↗</span></Link>)}</div>
         </section>
       ) : null}
 

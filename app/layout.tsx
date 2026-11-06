@@ -3,6 +3,7 @@ import AuthGate from "@/components/AuthGate";
 import "./globals.css";
 import "./dashboard.css";
 import "./resource-library.css";
+import "./home-chat.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",
