@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import AuthGate from "@/components/AuthGate";
 import "./globals.css";
 import "./dashboard.css";
+import "./resource-library.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",
