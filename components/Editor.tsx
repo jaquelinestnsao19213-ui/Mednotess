@@ -240,7 +240,6 @@ export default function Editor({
 
   return (
     <div className="editor">
-
       <BubbleMenu editor={editor} tippyOptions={{ duration: 100, placement: "top" }}>
         <div className="bubble" onMouseDown={keep}>
           <button type="button" aria-label="Negrito" className={editor.isActive("bold") ? "on" : ""} onClick={() => chain().toggleBold().run()}><b>B</b></button>
@@ -308,40 +307,27 @@ export default function Editor({
                 {chip("Direita", () => chain().setTextAlign("right").run(), editor.isActive({ textAlign: "right" }))}
                 {chip("Justificado", () => chain().setTextAlign("justify").run(), editor.isActive({ textAlign: "justify" }))}
               </div>
-             <p className="sheet-label">Tamanho da fonte</p>
-
-<div className="sheet-row">
-  {SIZES.map((s) =>
-    chip(
-      s.name,
-      () => (
-        s.v
-          ? chain().setFontSize(s.v).run()
-          : chain().unsetFontSize().run()
-      ),
-      s.v ? editor.isActive("textStyle", { fontSize: s.v }) : false,
-      `Tamanho ${s.name}`
-    )
-  )}
-
-  {chip("Personalizado", () => {
-    const value = window.prompt(
-      "Digite o tamanho da fonte em pixels:",
-      "22"
-    );
-
-    if (value === null) return;
-
-    const size = Number(value);
-
-    if (!Number.isFinite(size) || size < 6 || size > 100) {
-      window.alert("Digite um tamanho entre 6 e 100 pixels.");
-      return;
-    }
-
-    chain().setFontSize(`${size}px`).run();
-  })}
-</div>
+              <p className="sheet-label">Tamanho da fonte</p>
+              <div className="sheet-row">
+                {SIZES.map((s) =>
+                  chip(
+                    s.name,
+                    () => (s.v ? chain().setFontSize(s.v).run() : chain().unsetFontSize().run()),
+                    s.v ? editor.isActive("textStyle", { fontSize: s.v }) : false,
+                    `Tamanho ${s.name}`
+                  )
+                )}
+                {chip("Personalizado", () => {
+                  const value = window.prompt("Digite o tamanho da fonte em pixels:", "22");
+                  if (value === null) return;
+                  const size = Number(value);
+                  if (!Number.isFinite(size) || size < 6 || size > 100) {
+                    window.alert("Digite um tamanho entre 6 e 100 pixels.");
+                    return;
+                  }
+                  chain().setFontSize(`${size}px`).run();
+                })}
+              </div>
               <p className="sheet-label">Cor do texto</p>
               <div className="sheet-row">
                 {TEXT_COLORS.map((c) => (
@@ -369,6 +355,92 @@ export default function Editor({
                 ))}
                 {chip("Tirar", () => chain().unsetHighlight().run(), false, "Tirar marca-texto")}
               </div>
+              {editor.isActive("callout") && (
+                <>
+                  <p className="sheet-label">Personalizar bloco de destaque</p>
+                  <div className="sheet-row">
+                    <span className="sheet-label">Fundo:</span>
+                    {[
+                      "#fef3c7",
+                      "#dcfce7",
+                      "#dbeafe",
+                      "#fce7f3",
+                      "#ede9fe",
+                      "#fee2e2",
+                      "#f3f4f6",
+                      "#ffffff",
+                    ].map((color) => (
+                      <button
+                        type="button"
+                        key={color}
+                        aria-label={`Fundo ${color}`}
+                        className="swatch"
+                        style={{ background: color }}
+                        onClick={() =>
+                          chain().updateAttributes("callout", {
+                            backgroundColor: color,
+                          }).run()
+                        }
+                      />
+                    ))}
+                    {chip("Personalizada", () => {
+                      const color = window.prompt(
+                        "Digite a cor de fundo em hexadecimal:",
+                        "#fff3cd"
+                      );
+                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) {
+                        chain().updateAttributes("callout", {
+                          backgroundColor: color,
+                        }).run();
+                      }
+                    })}
+                  </div>
+                  <div className="sheet-row">
+                    <span className="sheet-label">Texto:</span>
+                    {[
+                      "#1b2430",
+                      "#991b1b",
+                      "#166534",
+                      "#1d4ed8",
+                      "#6b21a8",
+                      "#9d174d",
+                      "#ffffff",
+                    ].map((color) => (
+                      <button
+                        type="button"
+                        key={color}
+                        aria-label={`Texto ${color}`}
+                        className="swatch"
+                        style={{ background: color }}
+                        onClick={() =>
+                          chain().updateAttributes("callout", {
+                            textColor: color,
+                          }).run()
+                        }
+                      />
+                    ))}
+                    {chip("Personalizada", () => {
+                      const color = window.prompt(
+                        "Digite a cor do texto em hexadecimal:",
+                        "#1b2430"
+                      );
+                      if (color && /^#[0-9a-fA-F]{6}$/.test(color)) {
+                        chain().updateAttributes("callout", {
+                          textColor: color,
+                        }).run();
+                      }
+                    })}
+                  </div>
+                  <div className="sheet-row">
+                    {chip("Restaurar cores", () =>
+                      chain().updateAttributes("callout", {
+                        backgroundColor: null,
+                        textColor: null,
+                      }).run()
+                    )}
+                  </div>
+                </>
+              )}
               {editor.isActive("table") && (
                 <>
                   <p className="sheet-label">Tabela</p>
