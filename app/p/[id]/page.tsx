@@ -213,8 +213,17 @@ function PageView({ id }: { id: string }) {
     </section>
   );
 
-  const editor = (
-    <Editor key={`${page.id}-${editorVersion}`} initial={toDoc(page.content)} onChange={(doc: JSONContent) => save({ content: doc })} />
+    const editor = (
+    <Editor 
+      key={`${page.id}-${editorVersion}`} 
+      initial={toDoc(page.content)} 
+      onChange={(doc: JSONContent) => {
+        // Atualiza o estado da página local imediatamente para o PageAssistant receber o texto novo
+        setPage((current) => current ? { ...current, content: doc } : current);
+        // Mantém a função de salvamento com a lógica de espera (debounce) para o banco de dados
+        save({ content: doc });
+      }} 
+    />
   );
 
   return (
