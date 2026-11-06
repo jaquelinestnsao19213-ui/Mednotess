@@ -78,7 +78,7 @@ export async function POST(request: Request) {
   try {
     const anthropic = new Anthropic({ apiKey, timeout: 30_000, maxRetries: 1 });
     const response = await anthropic.messages.create({
-      model: "claude-3-5-sonnet-latest",
+      model: "claude-sonnet-5-5",
       max_tokens: 1_024,
       system: "Você é a assistente de estudos do Mednotes. Responda em português brasileiro, com clareza, cordialidade e foco em produtividade e aprendizagem. Nesta etapa você só conversa: não afirme que criou, editou ou consultou dados do aplicativo, pois ainda não tem acesso às ferramentas nem ao contexto do usuário. Quando solicitado a executar uma ação no app, explique que pode ajudar a planejar, mas a execução integrada ainda não está disponível.",
       messages,
