@@ -162,6 +162,20 @@ function metaContent(document: Document, selector: string) {
   return document.querySelector(selector)?.getAttribute("content")?.trim() || "";
 }
 
+// Dados para o cartão de prévia (título, resumo e miniatura), vindos das marcações do próprio site.
+function previewOf(document: Document, base: string) {
+  const description =
+    metaContent(document, 'meta[property="og:description"]') ||
+    metaContent(document, 'meta[name="description"]') ||
+    metaContent(document, 'meta[name="twitter:description"]');
+  const image = safeHttp(
+    metaContent(document, 'meta[property="og:image"]') || metaContent(document, 'meta[name="twitter:image"]') || null,
+    base
+  );
+  const siteName = metaContent(document, 'meta[property="og:site_name"]');
+  return { description: description.slice(0, 500), image, siteName: siteName.slice(0, 120) };
+}
+
 /* ---------- rota ---------- */
 
 export async function POST(request: Request) {
@@ -192,11 +206,11 @@ export async function POST(request: Request) {
     if (!response.ok) return jsonError(`O site respondeu com erro (${response.status}).`, 502);
     if (type.includes("application/pdf")) {
       await response.body?.cancel();
-      return NextResponse.json({ ...common, title: decodeURIComponent(finalUrl.pathname.split("/").pop() || common.host), readerHtml: null }, { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json({ ...common, title: decodeURIComponent(finalUrl.pathname.split("/").pop() || common.host), readerHtml: null, description: "", image: null, siteName: "" }, { headers: { "Cache-Control": "no-store" } });
     }
     if (!type.includes("html")) {
       await response.body?.cancel();
-      return NextResponse.json({ ...common, title: common.host, readerHtml: null }, { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json({ ...common, title: common.host, readerHtml: null, description: "", image: null, siteName: "" }, { headers: { "Cache-Control": "no-store" } });
     }
 
     const html = await readCapped(response, MAX_HTML_BYTES);
@@ -214,8 +228,9 @@ export async function POST(request: Request) {
     } catch {
       readerHtml = null;
     }
+    const preview = previewOf(document as unknown as Document, finalUrl.toString());
     return NextResponse.json(
-      { ...common, title: (pageTitle || common.host).slice(0, 300), readerHtml: readerHtml && readerHtml.replace(/<[^>]+>/g, "").trim().length > 120 ? readerHtml : null },
+      { ...common, ...preview, title: (pageTitle || common.host).slice(0, 300), readerHtml: readerHtml && readerHtml.replace(/<[^>]+>/g, "").trim().length > 120 ? readerHtml : null },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
