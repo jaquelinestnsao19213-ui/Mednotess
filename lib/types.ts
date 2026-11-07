@@ -53,3 +53,17 @@ export type ResourceLink = {
   created_at: string;
   updated_at: string;
 };
+
+export type Flashcard = {
+  id: string;
+  user_id: string;
+  front: string;
+  back: string;
+  interval: number;
+  ease_factor: number;
+  repetitions: number;
+  /** Data de revisão no formato YYYY-MM-DD. */
+  next_review: string;
+  created_at: string;
+  updated_at: string;
+};
