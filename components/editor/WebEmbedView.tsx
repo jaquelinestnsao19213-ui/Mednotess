@@ -4,7 +4,10 @@ import { useEffect, useState } from "react";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { supabase } from "@/lib/supabase";
 
-type EmbedInfo = { finalUrl: string; host: string; title: string; embeddable: boolean; readerHtml: string | null };
+type EmbedInfo = {
+  finalUrl: string; host: string; title: string; embeddable: boolean; readerHtml: string | null;
+  description?: string; image?: string | null; siteName?: string;
+};
 type Mode = "site" | "reader";
 
 const READER_CSS = `
@@ -80,7 +83,18 @@ export default function WebEmbedView({ node, updateAttributes, deleteNode, edito
   } else if (!info || !mode) {
     body = !info
       ? <p className="webnb-msg">Carregando o site…</p>
-      : <p className="webnb-msg">Esse site não permite ser exibido aqui e não tem texto que dê para mostrar em modo leitura. <a href={info.finalUrl} target="_blank" rel="noopener noreferrer">Abrir em outra aba</a></p>;
+      : (
+        <div className="webnb-card">
+          {info.image && <img className="webnb-card-img" src={info.image} alt="" referrerPolicy="no-referrer" loading="lazy" onError={(e) => { e.currentTarget.style.display = "none"; }} />}
+          <div className="webnb-card-body">
+            <div className="webnb-card-site">{info.siteName || info.host}</div>
+            <div className="webnb-card-title">{title}</div>
+            {info.description && <p className="webnb-card-desc">{info.description}</p>}
+            <p className="webnb-card-note">Esse site não permite ser exibido aqui e não tem texto que dê para mostrar em modo leitura.</p>
+            <a className="pdfnb-btn on" href={info.finalUrl} target="_blank" rel="noopener noreferrer">Abrir o site ↗</a>
+          </div>
+        </div>
+      );
   } else if (mode === "site") {
     body = (
       <iframe
