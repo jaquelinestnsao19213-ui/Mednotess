@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import AuthGate from "@/components/AuthGate";
+import TranscriberShortcut from "@/components/TranscriberShortcut";
 import "./globals.css";
 import "./dashboard.css";
 import "./resource-library.css";
@@ -20,7 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="pt-BR">
       <body>
-        <AuthGate>{children}</AuthGate>
+        <AuthGate>
+          {children}
+          <TranscriberShortcut />
+        </AuthGate>
       </body>
     </html>
   );
