@@ -1,6 +1,4 @@
--- Create persistent, private study material generated from page assistants.
--- Run this file only in the Supabase SQL Editor.
-
+-- Persistent private study material generated from page assistants.
 create table if not exists public.study_review_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -26,10 +24,8 @@ create index if not exists study_review_items_page_idx
   on public.study_review_items (user_id, page_id, created_at desc);
 
 alter table public.study_review_items enable row level security;
-
 drop policy if exists "study_review_items: dono" on public.study_review_items;
 create policy "study_review_items: dono" on public.study_review_items
   for all using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
-
 grant select, insert, update, delete on public.study_review_items to authenticated;
