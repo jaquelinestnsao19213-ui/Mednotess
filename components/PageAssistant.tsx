@@ -1,20 +1,38 @@
 "use client";
 
+import { useParams } from "next/navigation";
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { JSONContent } from "@tiptap/core";
 import { supabase } from "@/lib/supabase";
+import type { ReviewMaterial } from "@/lib/types";
 
-type ChatMessage = { role: "user" | "assistant"; content: string; insertText?: string | null };
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  insertText?: string | null;
+  reviewItems?: ReviewMaterial[];
+  saved?: boolean;
+  inserted?: boolean;
+};
 
 function pageText(node: JSONContent | undefined): string {
   if (!node) return "";
   if (node.type === "text") return node.text ?? "";
   if (node.type === "fileCard") return `[PDF anexado: ${String(node.attrs?.name ?? "arquivo")}]`;
   const parts = (node.content ?? []).map(pageText).filter(Boolean);
-  if (node.type === "paragraph" || node.type === "heading" || node.type === "listItem" || node.type === "tableCell" || node.type === "tableHeader") {
-    return parts.join("") + "\n";
-  }
+  if (["paragraph", "heading", "listItem", "tableCell", "tableHeader"].includes(node.type ?? "")) return parts.join("") + "\n";
   return parts.join(node.type === "doc" ? "" : "\n");
+}
+
+function asPlainText(items: ReviewMaterial[]) {
+  return items.map((item, index) => {
+    const heading = `${index + 1}. ${item.title}`;
+    const question = `Pergunta: ${item.front}`;
+    const alternatives = item.type === "question" && item.options.length
+      ? `\n${item.options.map((option) => `  - ${option}`).join("\n")}`
+      : "";
+    return `${heading}\n${question}${alternatives}\nResposta: ${item.back}${item.explanation ? `\nComentário: ${item.explanation}` : ""}`;
+  }).join("\n\n");
 }
 
 export default function PageAssistant({
@@ -26,10 +44,13 @@ export default function PageAssistant({
   content: JSONContent;
   onInsert: (text: string) => void;
 }) {
+  const params = useParams<{ id?: string }>();
+  const pageId = typeof params?.id === "string" ? params.id : null;
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(false);
+  const [savingIndex, setSavingIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -58,15 +79,63 @@ export default function PageAssistant({
           pageContext: { title: title.slice(0, 300), text: contextText },
         }),
       });
-      const result = await response.json() as { message?: string; insertText?: string | null; error?: string };
+      const result = await response.json() as { message?: string; insertText?: string | null; reviewItems?: ReviewMaterial[]; error?: string };
       if (!response.ok || !result.message) throw new Error(result.error ?? "Não foi possível enviar a mensagem.");
-      setMessages((current) => [...current, { role: "assistant" as const, content: result.message!, insertText: result.insertText ?? null }].slice(-12));
+      setMessages((current) => [...current, {
+        role: "assistant",
+        content: result.message!,
+        insertText: result.insertText ?? null,
+        reviewItems: Array.isArray(result.reviewItems) ? result.reviewItems : [],
+      }].slice(-12));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Ocorreu um erro. Tente novamente.");
     } finally {
       setLoading(false);
       inputRef.current?.focus();
     }
+  }
+
+  async function saveReviewItems(messageIndex: number) {
+    const message = messages[messageIndex];
+    if (!pageId || !message?.reviewItems?.length || message.saved || savingIndex !== null) return;
+    setSavingIndex(messageIndex);
+    setError(null);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setError("Sua sessão expirou. Entre novamente para salvar as revisões.");
+      setSavingIndex(null);
+      return;
+    }
+
+    const rows = message.reviewItems.map((item) => ({
+      user_id: user.id,
+      page_id: pageId,
+      page_title: title,
+      type: item.type,
+      title: item.title,
+      front: item.front,
+      back: item.back,
+      options: item.options,
+      correct_answer: item.correct_answer,
+      explanation: item.explanation,
+      status: "new",
+      last_reviewed_at: null,
+      next_review_at: new Date().toISOString(),
+    }));
+    const { error: saveError } = await supabase.from("study_review_items").insert(rows);
+    if (saveError) {
+      setError("Não foi possível salvar. Confira se executou supabase/ai-review.sql no Supabase.");
+    } else {
+      setMessages((current) => current.map((item, index) => index === messageIndex ? { ...item, saved: true } : item));
+    }
+    setSavingIndex(null);
+  }
+
+  function insertReviewItems(messageIndex: number) {
+    const message = messages[messageIndex];
+    if (!message?.reviewItems?.length || message.inserted) return;
+    onInsert(asPlainText(message.reviewItems));
+    setMessages((current) => current.map((item, index) => index === messageIndex ? { ...item, inserted: true } : item));
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -79,68 +148,94 @@ export default function PageAssistant({
       event.preventDefault();
       if (draft.trim() && !loading) void sendMessage(draft);
     }
+    if (event.key === "Escape") setOpen(false);
   }
-
-  const panel: React.CSSProperties = {
-    position: "fixed",
-    right: 12,
-    bottom: "calc(var(--kb, 0px) + 108px)",
-    zIndex: 35,
-    width: "min(410px, calc(100vw - 24px))",
-    maxHeight: "min(68vh, 620px)",
-    display: open ? "flex" : "none",
-    flexDirection: "column",
-    gap: 12,
-    padding: 14,
-    color: "var(--ink)",
-    background: "var(--surface)",
-    border: "1px solid var(--line)",
-    borderRadius: 16,
-    boxShadow: "0 12px 40px rgb(0 0 0 / 0.2)",
-  };
 
   return (
     <>
-      <section style={panel} aria-label="Chat com assistente da página">
-        <header style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: "1px solid var(--line)", paddingBottom: 10 }}>
-          <span aria-hidden="true" style={{ color: "var(--accent)", fontSize: 22 }}>✦</span>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <strong>Assistente desta página</strong>
-            <div style={{ color: "var(--muted)", fontSize: 12 }}>Lê o texto do caderno e pode sugerir conteúdo</div>
-          </div>
-          <button type="button" className="secondary" aria-label="Fechar chat" onClick={() => setOpen(false)} style={{ padding: "4px 9px" }}>×</button>
-        </header>
-        <div ref={listRef} role="log" aria-live="polite" style={{ display: "grid", gap: 10, minHeight: 100, overflowY: "auto", padding: "2px 1px", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-          {messages.length === 0 ? (
-            <p className="muted" style={{ margin: "auto 0", fontSize: 14 }}>Pergunte sobre esta página ou peça um resumo, complemento ou lista de revisão.</p>
-          ) : messages.map((message, index) => (
-            <div key={`${index}-${message.role}`} style={{ justifySelf: message.role === "user" ? "end" : "stretch", maxWidth: "95%" }}>
-              <div style={{ padding: "9px 11px", borderRadius: 12, background: message.role === "user" ? "color-mix(in srgb, var(--accent) 12%, var(--surface))" : "var(--bg)", fontSize: 14, lineHeight: 1.5 }}>{message.content}</div>
-              {message.insertText && (
-                <button type="button" className="primary" style={{ marginTop: 7, padding: "7px 10px", fontSize: 13 }} onClick={() => { onInsert(message.insertText!); setMessages((current) => current.map((item, i) => i === index ? { ...item, insertText: null } : item)); }}>
-                  Inserir sugestão na página
-                </button>
-              )}
+      {open && (
+        <div className="page-assistant-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+          <section className="page-assistant-panel" role="dialog" aria-modal="true" aria-labelledby="page-assistant-title">
+            <header className="page-assistant-header">
+              <span aria-hidden="true" className="page-assistant-icon">✦</span>
+              <div className="page-assistant-heading">
+                <strong id="page-assistant-title">Assistente desta página</strong>
+                <span>Use o conteúdo do caderno para estudar e gerar revisões</span>
+              </div>
+              <button type="button" className="secondary page-assistant-close" aria-label="Fechar chat" onClick={() => setOpen(false)}>×</button>
+            </header>
+
+            <div ref={listRef} className="page-assistant-messages" role="log" aria-live="polite" aria-relevant="additions text">
+              {messages.length === 0 ? (
+                <p className="page-assistant-empty">Pergunte sobre esta página ou peça flashcards e questões. A IA apresentará os materiais antes de você escolher onde salvá-los.</p>
+              ) : messages.map((message, index) => (
+                <article key={`${index}-${message.role}`} className={`page-assistant-message ${message.role}`}>
+                  <div className="page-assistant-bubble">{message.content}</div>
+                  {message.insertText && (
+                    <button type="button" className="secondary page-assistant-action" onClick={() => onInsert(message.insertText!)}>
+                      Inserir sugestão na página
+                    </button>
+                  )}
+                  {!!message.reviewItems?.length && (
+                    <div className="page-assistant-review-preview">
+                      <strong>{message.reviewItems.length} material(is) de revisão gerado(s)</strong>
+                      {message.reviewItems.map((item, itemIndex) => (
+                        <div className="page-assistant-review-item" key={`${itemIndex}-${item.title}`}>
+                          <span className="study-pill">{item.type === "question" ? "Questão" : "Flashcard"}</span>
+                          <strong>{item.title}</strong>
+                          <p>{item.front}</p>
+                          {item.type === "question" && item.options.length > 0 && (
+                            <ul>{item.options.map((option) => <li key={option}>{option}</li>)}</ul>
+                          )}
+                          <details><summary>Ver resposta e comentário</summary><p><b>Resposta:</b> {item.back}</p>{item.explanation && <p><b>Comentário:</b> {item.explanation}</p>}</details>
+                        </div>
+                      ))}
+                      <div className="page-assistant-actions">
+                        <button type="button" className="secondary" disabled={message.inserted} onClick={() => insertReviewItems(index)}>
+                          {message.inserted ? "Inserido na página" : "Inserir na Página"}
+                        </button>
+                        <button type="button" className="primary" disabled={message.saved || savingIndex === index} onClick={() => void saveReviewItems(index)}>
+                          {message.saved ? "Salvo em Revisões" : savingIndex === index ? "Salvando…" : "Salvar em Revisões"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              ))}
+              {loading && <p className="page-assistant-loading" role="status">Preparando uma resposta…</p>}
             </div>
-          ))}
-          {loading && <p className="muted" role="status" style={{ margin: 0 }}>Preparando uma resposta…</p>}
+
+            {error && <p role="alert" className="notice page-assistant-error">{error}</p>}
+
+            <form onSubmit={submit} className="page-assistant-form">
+              <label className="sr-only" htmlFor="page-assistant-input">Mensagem para a assistente</label>
+              <textarea
+                id="page-assistant-input"
+                ref={inputRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Peça um resumo, flashcards ou questões…"
+                rows={2}
+                maxLength={4000}
+              />
+              <button type="submit" className="primary" aria-label="Enviar mensagem" disabled={loading || !draft.trim()}>{loading ? "…" : "Enviar"}</button>
+            </form>
+            <small className="page-assistant-footnote">O texto desta página é enviado à assistente para responder. PDFs anexados não são lidos.</small>
+          </section>
         </div>
-        {error && <p role="alert" className="notice" style={{ margin: 0, fontSize: 13 }}>{error}</p>}
-        <form onSubmit={submit} style={{ display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid var(--line)", borderRadius: 12, padding: 7 }}>
-          <label htmlFor="page-assistant-input" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}>Escreva sua mensagem</label>
-          <textarea id="page-assistant-input" ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="Pergunte ou peça para adicionar algo…" rows={2} maxLength={4_000} disabled={loading} style={{ flex: 1, minWidth: 0, resize: "none", border: 0, outline: 0, background: "transparent", color: "var(--ink)", font: "inherit", fontSize: 14 }} />
-          <button type="submit" className="primary" aria-label="Enviar mensagem" disabled={loading || !draft.trim()} style={{ padding: "7px 12px" }}>{loading ? "…" : "↑"}</button>
-        </form>
-        <small style={{ color: "var(--muted)", fontSize: 11 }}>O conteúdo do caderno é enviado à Anthropic. PDFs anexados não são lidos nesta versão.</small>
-      </section>
+      )}
+
       <button
         type="button"
-        className={open ? "primary" : "secondary"}
+        className="primary page-assistant-launch"
         aria-expanded={open}
-        aria-label={open ? "Fechar assistente" : "Abrir assistente desta página"}
-        onClick={() => { setOpen((value) => !value); if (!open) setTimeout(() => inputRef.current?.focus(), 0); }}
-        style={{ position: "fixed", right: 14, bottom: "calc(var(--kb, 0px) + 58px)", zIndex: 36, borderRadius: 999, boxShadow: "0 4px 16px rgb(0 0 0 / 0.18)", fontWeight: 600 }}
-      >✦ {open ? "Fechar" : "Agente"}</button>
+        aria-controls="page-assistant-title"
+        onClick={() => {
+          setOpen(true);
+          window.setTimeout(() => inputRef.current?.focus(), 0);
+        }}
+      >✦ Assistente</button>
     </>
   );
 }
