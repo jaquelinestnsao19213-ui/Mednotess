@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import HomeChat from "@/components/HomeChat";
 import type { StudyTask, Subject } from "@/lib/types";
 
 const DAY_NAMES = ["Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado", "Domingo"];
@@ -202,6 +203,8 @@ export default function WeeklyPlanningPage() {
           })}</div>
         ) : <div className="day-empty"><span aria-hidden="true">✦</span><div><strong>Um espaço em branco também faz parte do plano.</strong><p>Adicione uma tarefa de estudo para este dia quando quiser.</p></div><button type="button" className="secondary" onClick={startCreate}>＋ Adicionar atividade</button></div>}
       </section>
+      <HomeChat scope="planner" onChanged={() => void load()} />
+
       <p className="planner-footnote">Seu planejamento é privado e salvo na sua conta. <a href="/disciplinas">Gerenciar disciplinas</a></p>
     </div>
   );
