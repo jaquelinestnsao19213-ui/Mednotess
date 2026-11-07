@@ -98,3 +98,25 @@
 .home-chat-pending li button { width: 22px; height: 22px; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); font-size: 1rem; line-height: 1; }
 .home-chat-pending .is-uploading { color: var(--muted); padding-right: 10px; }
 .home-chat-form textarea { max-height: 40vh; }
+
+/* Prevenção de corte no textarea */
+textarea {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+textarea::-webkit-scrollbar-thumb {
+  background-color: rgba(148, 163, 184, 0.4);
+  border-radius: 3px;
+}
+
+/* Modal de escrita expandida */
+.backdrop-blur-sm {
+  backdrop-filter: blur(8px);
+}
+
