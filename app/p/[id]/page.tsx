@@ -1,297 +1,257 @@
 "use client";
 
 import Link from "next/link";
-import dynamic from "next/dynamic";
-import { useParams, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import type { JSONContent } from "@tiptap/core";
+import { useEffect, useState } from "react";
+import HomeChat from "@/components/HomeChat";
 import { supabase } from "@/lib/supabase";
-import { uploadFile } from "@/lib/upload";
-import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
-import type { PageRow } from "@/lib/types";
-import PageAssistant from "@/components/PageAssistant";
+import type { PageRow, StudyTask, Subject } from "@/lib/types";
 
-const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
-
-type Crumb = { id: string; title: string };
-
-export default function PageRoute() {
-  const { id } = useParams<{ id: string }>();
-  return <PageView key={id} id={id} />;
+function dateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-function PageView({ id }: { id: string }) {
-  const router = useRouter();
-  const [page, setPage] = useState<PageRow | null>(null);
-  const [children, setChildren] = useState<PageRow[]>([]);
-  const [crumbs, setCrumbs] = useState<Crumb[]>([]);
-  const [status, setStatus] = useState<"saved" | "saving">("saved");
-  const [notFound, setNotFound] = useState(false);
+function mondayOf(date: Date) {
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
+  return monday;
+}
+
+export default function Dashboard() {
+  const [subjects, setSubjects] = useState<Subject[] | null>(null);
+  const [notebooks, setNotebooks] = useState<PageRow[]>([]);
+  const [tasks, setTasks] = useState<StudyTask[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [editorVersion, setEditorVersion] = useState(0);
-
-  const pending = useRef<Record<string, unknown>>({});
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const coverInput = useRef<HTMLInputElement>(null);
-
-  async function flush() {
-    const patch = pending.current;
-    pending.current = {};
-    if (Object.keys(patch).length === 0) return;
-    const { error } = await supabase.from("pages").update(patch).eq("id", id);
-    setError(error ? "Não foi possível salvar. Tente de novo." : null);
-    setStatus("saved");
-  }
-  const flushRef = useRef(flush);
-  flushRef.current = flush;
-
-  function save(patch: Record<string, unknown>) {
-    pending.current = { ...pending.current, ...patch };
-    setStatus("saving");
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => flushRef.current(), 800);
-  }
-
-  function update(patch: Partial<PageRow>) {
-    setPage((p) => (p ? { ...p, ...patch } : p));
-    save(patch);
-  }
-
-  function insertAssistantText(text: string) {
-    if (!page) return;
-    const doc = toDoc(page.content);
-    const paragraphs: JSONContent[] = text.split(/\n+/).map((line) => ({
-      type: "paragraph",
-      content: line.trim() ? [{ type: "text", text: line.trim() }] : [],
-    }));
-    const content = [...(doc.content ?? []), ...paragraphs];
-    const next = { ...doc, content };
-    setPage((current) => current ? { ...current, content: next } : current);
-    save({ content: next });
-    setEditorVersion((version) => version + 1);
-  }
 
   useEffect(() => {
-    const onHide = () => {
-      if (document.visibilityState === "hidden") flushRef.current();
-    };
-    document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", onHide);
-    return () => {
-      document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", onHide);
-      if (timer.current) clearTimeout(timer.current);
-      flushRef.current();
-    };
+    const weekStart = mondayOf(new Date());
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+
+    (async () => {
+      const [subjectResult, notebookResult, taskResult] = await Promise.all([
+        supabase.from("subjects").select("*").order("position").order("created_at"),
+        supabase
+          .from("pages")
+          .select("id,title,icon,type,parent_id,cover_url,content,props,position,created_at,updated_at")
+          .eq("type", "notebook")
+          .is("parent_id", null)
+          .order("created_at", { ascending: true }),
+        supabase
+          .from("study_tasks")
+          .select("*")
+          .gte("scheduled_date", dateKey(weekStart))
+          .lte("scheduled_date", dateKey(weekEnd))
+          .order("time_label"),
+      ]);
+
+      if (subjectResult.error || notebookResult.error || taskResult.error) {
+        setError("Não foi possível carregar seu espaço. Confira se as tabelas do app estão configuradas no Supabase.");
+        setSubjects([]);
+        return;
+      }
+
+      setSubjects((subjectResult.data ?? []) as Subject[]);
+      setNotebooks((notebookResult.data ?? []) as PageRow[]);
+      setTasks((taskResult.data ?? []) as StudyTask[]);
+    })();
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
-      if (!row) return setNotFound(true);
-      const current = row as PageRow;
-      setPage(current);
-
-      const { data: kids } = await supabase
-        .from("pages")
-        .select("*")
-        .eq("parent_id", id)
-        .order("position")
-        .order("created_at");
-      setChildren((kids ?? []) as PageRow[]);
-
-      const trail: Crumb[] = [];
-      let parent = current.parent_id;
-      for (let i = 0; i < 10 && parent; i++) {
-        const { data: p } = await supabase.from("pages").select("id,title,parent_id").eq("id", parent).maybeSingle();
-        if (!p) break;
-        trail.unshift({ id: p.id, title: p.title });
-        parent = p.parent_id;
-      }
-      setCrumbs(trail);
-    })();
-  }, [id]);
-
-  async function addChild(kind: "lesson" | "page") {
-    const row =
-      kind === "lesson"
-        ? { title: "Nova aula / tema", type: "lesson", content: LESSON_TEMPLATE }
-        : { title: "Nova página", type: "page" };
-    const { data, error } = await supabase
-      .from("pages")
-      .insert({ ...row, parent_id: id })
-      .select("id")
-      .single();
-    if (error || !data) return setError("Não foi possível criar a página.");
-    router.push(`/p/${data.id}`);
-  }
-
-  async function updateChild(childId: string, patch: Partial<PageRow>) {
-    const { error } = await supabase.from("pages").update(patch).eq("id", childId);
-    if (error) setError("Não foi possível salvar a alteração na tabela.");
-  }
-
-  function editChildLocal(childId: string, patch: Partial<PageRow>) {
-    setChildren((list) => list.map((c) => (c.id === childId ? { ...c, ...patch } : c)));
-  }
-
-  async function onCover(file: File | undefined) {
-    if (!file) return;
-    try {
-      update({ cover_url: await uploadFile(file) });
-    } catch {
-      setError("Não foi possível enviar a capa. Confira se rodou o schema2.sql no Supabase.");
-    }
-  }
-
-  async function remove() {
-    if (!page) return;
-    const ok = window.confirm(
-      children.length > 0
-        ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito."
-        : "Excluir esta página? Isso não pode ser desfeito."
-    );
-    if (!ok) return;
-    pending.current = {};
-    const { error } = await supabase.from("pages").delete().eq("id", id);
-    if (error) return setError("Não foi possível excluir.");
-    router.push(page.parent_id ? `/p/${page.parent_id}` : "/");
-  }
-
-  if (notFound) return <p className="empty">Página não encontrada. <Link href="/">Voltar ao início</Link></p>;
-  if (!page) return <p className="muted">Carregando…</p>;
-
-  const isLesson = page.type === "lesson";
-
-  const table = (
-    <section className="subpages">
-      <div className="head">
-        <h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2>
-        <div className="row">
-          <button className="primary" onClick={() => addChild("lesson")}>Nova aula</button>
-          <button className="secondary" onClick={() => addChild("page")}>Nova página</button>
-        </div>
-      </div>
-      {children.length === 0 ? (
-        <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr><th>Aula / tema</th><th>Data</th><th></th></tr>
-            </thead>
-            <tbody>
-              {children.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <input
-                      value={c.title}
-                      aria-label="Título"
-                      onChange={(e) => editChildLocal(c.id, { title: e.target.value })}
-                      onBlur={(e) => updateChild(c.id, { title: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="date"
-                      value={c.props?.date ?? ""}
-                      aria-label="Data"
-                      onChange={(e) => {
-                        const props = { ...c.props, date: e.target.value };
-                        editChildLocal(c.id, { props });
-                        updateChild(c.id, { props });
-                      }}
-                    />
-                  </td>
-                  <td><Link className="open" href={`/p/${c.id}`}>Abrir</Link></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-
-    const editor = (
-    <Editor 
-      key={`${page.id}-${editorVersion}`} 
-      initial={toDoc(page.content)} 
-      onChange={(doc: JSONContent) => {
-        // Atualiza o estado da página local imediatamente para o PageAssistant receber o texto novo
-        setPage((current) => current ? { ...current, content: doc } : current);
-        // Mantém a função de salvamento com a lógica de espera (debounce) para o banco de dados
-        save({ content: doc });
-      }} 
-    />
-  );
+  const today = dateKey(new Date());
+  const todaysTasks = tasks
+    .filter((task) => task.scheduled_date === today)
+    .sort((a, b) => a.time_label.localeCompare(b.time_label));
+  const done = tasks.filter((task) => task.completed).length;
+  const progress = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
+  const subjectNames = new Map((subjects ?? []).map((subject) => [subject.id, subject.name]));
 
   return (
-    <>
-      <nav className="crumbs" aria-label="Caminho">
-        <Link href="/">Início</Link>
-        {crumbs.map((c) => (
-          <span key={c.id}>
-            <span className="sep">/</span>
-            <Link href={`/p/${c.id}`}>{c.title || "Sem título"}</Link>
-          </span>
-        ))}
-      </nav>
-
-      {page.cover_url ? (
-        <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }}>
-          <div className="cover-actions">
-            <button className="secondary" onClick={() => coverInput.current?.click()}>Trocar capa</button>
-            <button className="secondary" onClick={() => update({ cover_url: null })}>Remover</button>
-          </div>
+    <div className="dashboard-page">
+      <section className="welcome-card">
+        <div className="welcome-copy">
+          <span className="eyebrow">SEU ESPAÇO DE APRENDIZAGEM</span>
+          <h1 className="display">Estude com mais clareza.</h1>
+          <p>Suas anotações, disciplinas e planos de estudo em um só lugar.</p>
+          <Link className="welcome-action" href="/planejamento">
+            Organizar minha semana <span aria-hidden="true">→</span>
+          </Link>
         </div>
-      ) : (
-        <button className="secondary small-btn" onClick={() => coverInput.current?.click()}>Adicionar capa</button>
-      )}
-      <input ref={coverInput} type="file" accept="image/*" hidden onChange={(e) => { onCover(e.target.files?.[0]); e.target.value = ""; }} />
+        <div className="welcome-art" aria-hidden="true">
+          <span>✦</span>
+          <i>✎</i>
+          <b>◷</b>
+        </div>
+      </section>
 
-      <div className="titlebar">
-  {page.icon && (
-    <button
-      className="icon-btn"
-      aria-label="Trocar ícone"
-      onClick={() => {
-        const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
-        if (v !== null) update({ icon: v.trim() || null });
-      }}
-    >
-      {page.icon}
-    </button>
-  )}
-
-  <input
-    className="title-input display"
-    value={page.title}
-    placeholder="Sem título"
-    onChange={(e) => update({ title: e.target.value })}
-    aria-label="Título da página"
-  />
-</div>
-      <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
+      <HomeChat />
       {error && <p className="notice">{error}</p>}
 
-      {isLesson && (
-        <div className="props">
-          <label>Data
-            <input type="date" value={page.props?.date ?? ""} onChange={(e) => update({ props: { ...page.props, date: e.target.value } })} />
-          </label>
-          <label>Disciplina
-            <input value={page.props?.discipline ?? ""} placeholder="Ex.: Tutoria" onChange={(e) => update({ props: { ...page.props, discipline: e.target.value } })} />
-          </label>
-          <label>Sala
-            <input value={page.props?.room ?? ""} placeholder="Ex.: 314 — Bloco D" onChange={(e) => update({ props: { ...page.props, room: e.target.value } })} />
-          </label>
+      <section className="workspace-section" aria-labelledby="workspace-title">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">COMECE POR AQUI</span>
+            <h2 id="workspace-title">Meu espaço</h2>
+          </div>
+          <span className="section-hint">Tudo para manter seus estudos em movimento</span>
         </div>
-      )}
+        <div className="workspace-grid">
+          <Link href="/cadernos" className="workspace-card workspace-notes">
+            <span className="workspace-icon" aria-hidden="true">▤</span>
+            <span className="workspace-label">ANOTAÇÕES</span>
+            <strong>Cadernos</strong>
+            <span>Matérias, aulas e resumos em um só lugar.</span>
+            <span className="workspace-link">
+              Abrir cadernos <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
 
-      {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
-      <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
-      <button className="danger" onClick={remove}>Excluir página</button>
-    </>
+          <Link href="/disciplinas" className="workspace-card workspace-subjects">
+            <span className="workspace-icon" aria-hidden="true">✳</span>
+            <span className="workspace-label">SEU CONTEÚDO</span>
+            <strong>Disciplinas</strong>
+            <span>Organize temas e acesse cada caderno.</span>
+            <span className="workspace-link">
+              Ver disciplinas <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+
+          <Link href="/planejamento" className="workspace-card workspace-planner">
+            <span className="workspace-icon" aria-hidden="true">▦</span>
+            <span className="workspace-label">PRÓXIMOS PASSOS</span>
+            <strong>Planejamento semanal</strong>
+            <span>Transforme seus objetivos em uma rotina possível.</span>
+            <span className="workspace-link">
+              Planejar estudos <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+
+          <Link href="/revisao" className="workspace-card workspace-review">
+            <span className="workspace-icon" aria-hidden="true">↺</span>
+            <span className="workspace-label">MEMORIZAÇÃO</span>
+            <strong>Revisão</strong>
+            <span>Flashcards, questões e prática guiada por repetição espaçada.</span>
+            <span className="workspace-link">
+              Abrir revisão <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+
+          <Link href="/reunioes" className="workspace-card workspace-planner">
+            <span className="workspace-icon" aria-hidden="true">🎙</span>
+            <span className="workspace-label">INTELIGÊNCIA ARTIFICIAL</span>
+            <strong>Anotações IA</strong>
+            <span>Grave reuniões e transforme áudio em anotações organizadas.</span>
+            <span className="workspace-link">
+              Abrir transcritor <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+        </div>
+      </section>
+
+      <section className="dashboard-lower">
+        <div className="today-panel">
+          <div className="section-heading compact-heading">
+            <div>
+              <span className="eyebrow">SEU DIA</span>
+              <h2>Hoje</h2>
+            </div>
+            <Link href="/planejamento" className="text-link">
+              Ver semana <span aria-hidden="true">→</span>
+            </Link>
+          </div>
+
+          {todaysTasks.length ? (
+            <ul className="today-list">
+              {todaysTasks.slice(0, 4).map((task) => (
+                <li
+                  key={task.id}
+                  className={task.completed ? "today-task is-done" : "today-task"}
+                >
+                  <span className="today-dot" aria-hidden="true">
+                    {task.completed ? "✓" : ""}
+                  </span>
+                  <span className="today-time">{task.time_label}</span>
+                  <span className="today-task-copy">
+                    <strong>{task.title}</strong>
+                    <small>
+                      {subjectNames.get(task.subject_id ?? "") ?? "Disciplina removida"}
+                      {task.topic ? ` · ${task.topic}` : ""}
+                    </small>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="today-empty">
+              <span aria-hidden="true">☀</span>
+              <p>Um dia com espaço para aprender. Adicione uma atividade ao seu planejamento.</p>
+              <Link href="/planejamento">Montar minha semana</Link>
+            </div>
+          )}
+        </div>
+
+        <aside className="progress-panel">
+          <span className="eyebrow">RITMO DA SEMANA</span>
+          <h2>Um passo de cada vez.</h2>
+          <div className="progress-number">
+            <strong>{done}</strong>
+            <span>de {tasks.length} atividades concluídas</span>
+          </div>
+          <div
+            className="progress-track"
+            role="progressbar"
+            aria-label="Progresso das atividades nesta semana"
+            aria-valuenow={progress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <span style={{ width: `${progress}%` }} />
+          </div>
+          <p>
+            {tasks.length
+              ? `${progress}% da sua semana de estudos concluída`
+              : "Seu progresso aparece aqui quando planejar atividades."}
+          </p>
+          <Link href="/planejamento" className="progress-link">
+            Acompanhar planejamento <span aria-hidden="true">→</span>
+          </Link>
+        </aside>
+      </section>
+
+      {subjects?.length ? (
+        <section className="subject-shortcuts">
+          <div className="section-heading compact-heading">
+            <div>
+              <span className="eyebrow">SEUS TEMAS</span>
+              <h2>Continue de onde parou</h2>
+            </div>
+            <Link href="/disciplinas" className="text-link">
+              Todos <span aria-hidden="true">→</span>
+            </Link>
+          </div>
+          <div className="subject-shortcut-list">
+            {subjects.slice(0, 4).map((subject) => (
+              <Link
+                key={subject.id}
+                href={subject.notebook_page_id ? `/p/${subject.notebook_page_id}` : `/disciplinas/${subject.id}`}
+                className="subject-shortcut"
+              >
+                <span className="subject-shortcut-icon" aria-hidden="true">
+                  {subject.icon || "✦"}
+                </span>
+                <span>{subject.name}</span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {notebooks.length > 0 && (
+        <p className="dashboard-footnote">
+          Seus cadernos recentes estão disponíveis em <Link href="/cadernos">Cadernos</Link>.
+        </p>
+      )}
+    </div>
   );
 }

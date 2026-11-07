@@ -1,592 +1,302 @@
-body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  line-height: 1.55;
-  -webkit-text-size-adjust: 100%;
+"use client";
+
+import Link from "next/link";
+import dynamic from "next/dynamic";
+import { useParams, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import type { JSONContent } from "@tiptap/core";
+import { supabase } from "@/lib/supabase";
+import { uploadFile } from "@/lib/upload";
+import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
+import { extractPageText } from "@/lib/study";
+import type { PageRow } from "@/lib/types";
+import PageAssistant from "@/components/PageAssistant";
+import StudyWorkspace from "@/components/StudyWorkspace";
+
+const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
+
+type Crumb = { id: string; title: string };
+
+export default function PageRoute() {
+  const { id } = useParams<{ id: string }>();
+  return <PageView key={id} id={id} />;
 }
 
-a { color: inherit; }
+function PageView({ id }: { id: string }) {
+  const router = useRouter();
+  const [page, setPage] = useState<PageRow | null>(null);
+  const [children, setChildren] = useState<PageRow[]>([]);
+  const [crumbs, setCrumbs] = useState<Crumb[]>([]);
+  const [status, setStatus] = useState<"saved" | "saving">("saved");
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [editorVersion, setEditorVersion] = useState(0);
 
-.display { font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif; font-weight: 600; letter-spacing: -0.01em; }
-h1.display { font-size: 1.9rem; margin: 0; line-height: 1.2; }
-h2 { font-size: 1.1rem; margin: 0; }
+  const pending = useRef<Record<string, unknown>>({});
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const coverInput = useRef<HTMLInputElement>(null);
 
-.topbar {
-  display: flex; align-items: center; justify-content: space-between;
-  max-width: 720px; margin: 0 auto; padding: 14px 20px;
-}
-.brand { text-decoration: none; font-weight: 600; }
-.shell { max-width: 720px; margin: 0 auto; padding: 8px 20px 120px; }
-.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 18px; }
+  async function flush() {
+    const patch = pending.current;
+    pending.current = {};
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await supabase.from("pages").update(patch).eq("id", id);
+    setError(error ? "Não foi possível salvar. Tente de novo." : null);
+    setStatus("saved");
+  }
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
 
-button { font: inherit; cursor: pointer; border-radius: 8px; padding: 9px 14px; border: 1px solid transparent; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.primary { background: var(--accent); color: var(--accent-ink); }
-.secondary { background: transparent; color: var(--ink); border-color: var(--line); }
-.danger { background: transparent; color: var(--danger); border-color: var(--line); margin-top: 32px; }
-.link-button { background: none; color: var(--muted); padding: 4px 0; }
-
-.list { list-style: none; margin: 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-.list li + li { border-top: 1px solid var(--line); }
-.list a { display: block; padding: 14px 16px; text-decoration: none; }
-.list a:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-
-.empty, .muted { color: var(--muted); }
-.small { font-size: 0.85rem; margin: 4px 0 12px; }
-.notice { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-
-.crumbs { color: var(--muted); font-size: 0.9rem; margin: 8px 0 16px; display: flex; flex-wrap: wrap; gap: 4px; }
-.crumbs a { text-decoration: none; }
-.crumbs a:hover { text-decoration: underline; }
-.sep { margin: 0 6px; }
-
-.title-input {
-  width: 100%; border: 0; background: transparent; color: var(--ink);
-  font-size: 2rem; padding: 4px 0; line-height: 1.2;
-}
-.body-input {
-  width: 100%; min-height: 40vh; resize: vertical; border: 1px solid var(--line);
-  background: var(--surface); color: var(--ink); border-radius: 10px;
-  padding: 14px 16px; font: inherit; line-height: 1.65;
-}
-.subpages { margin-top: 32px; }
-
-.login { display: grid; gap: 14px; padding-top: 12vh; max-width: 420px; }
-.login label { display: grid; gap: 6px; font-size: 0.95rem; }
-.login input {
-  font: inherit; padding: 10px 12px; border-radius: 8px;
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-}
-.row { display: flex; gap: 10px; flex-wrap: wrap; }
-
-/* ---------- Passo 3: capa, ícone, editor e tabela de aulas ---------- */
-.small-btn { padding: 6px 12px; font-size: 0.9rem; margin-bottom: 8px; }
-.cover {
-  height: 190px; border-radius: 12px; margin-bottom: 14px;
-  background-size: cover; background-position: center; position: relative;
-  border: 1px solid var(--line);
-}
-.cover-actions { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 8px; }
-.cover-actions .secondary { background: var(--surface); }
-.titlebar {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin: 20px 0 12px;
-  width: 100%;
-}
-
-.titlebar .icon-btn {
-  flex: 0 0 auto;
-  font-size: 1.5rem;
-  padding: 4px;
-}
-
-.titlebar .title-input {
-  flex: 0 1 75%;
-  width: 75%;
-  min-width: 0;
-  text-align: center;
-  font-size: clamp(1.7rem, 5vw, 2.4rem);
-  font-weight: 600;
-}
-
-.cover ~ .titlebar {
-  margin-top: 20px;
-  padding-left: 0;
-}
-.props { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 8px 0 18px; }
-.props label { display: grid; gap: 4px; font-size: 0.85rem; color: var(--muted); }
-.props input, .data input {
-  font: inherit; color: var(--ink); background: var(--surface);
-  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%;
-}
-
-.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-.data { border-collapse: collapse; width: 100%; min-width: 460px; }
-.data th { text-align: left; font-weight: 500; color: var(--muted); font-size: 0.85rem; padding: 10px 12px; }
-.data td { border-top: 1px solid var(--line); padding: 6px 8px; }
-.data td input { border-color: transparent; background: transparent; }
-.data td input:focus { border-color: var(--line); background: var(--surface); }
-.open { display: inline-block; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; text-decoration: none; }
-
-.editor { margin: 4px 0 0; }
-.tiptap {
-  outline: none; min-height: 55vh; padding: 8px 0 140px;
-  font-family: "Iowan Old Style", Charter, "Palatino Linotype", Georgia, serif;
-  font-size: 1.12rem; line-height: 1.75; overflow-wrap: anywhere;
-}
-.tiptap > * + * { margin-top: 0.55em; }
-.tiptap h1, .tiptap h2, .tiptap h3 { font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; margin-bottom: 0.1em; }
-.tiptap h1 { font-size: 1.9rem; margin-top: 1.5em; }
-.tiptap h2 { font-size: 1.5rem; margin-top: 1.3em; }
-.tiptap h3 { font-size: 1.2rem; margin-top: 1.1em; }
-.tiptap ul, .tiptap ol { padding-left: 1.4em; }
-.tiptap blockquote { margin-left: 0; padding-left: 14px; border-left: 3px solid var(--accent); color: var(--muted); }
-.tiptap code { background: color-mix(in srgb, var(--ink) 8%, transparent); border-radius: 4px; padding: 1px 5px; font-size: 0.9em; font-family: ui-monospace, Menlo, Consolas, monospace; }
-.tiptap pre { background: color-mix(in srgb, var(--ink) 8%, var(--surface)); border-radius: 10px; padding: 12px 14px; overflow-x: auto; }
-.tiptap pre code { background: none; padding: 0; }
-.tiptap hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
-.tiptap mark { border-radius: 3px; padding: 0 2px; color: #1b2430; }
-.tiptap p.is-editor-empty:first-child::before,
-.tiptap .is-empty::before { content: attr(data-placeholder); color: var(--muted); float: left; height: 0; pointer-events: none; opacity: 0.7; }
-.tiptap ul[data-type="taskList"] { list-style: none; padding-left: 0; }
-.tiptap ul[data-type="taskList"] li { display: flex; gap: 8px; align-items: flex-start; }
-.tiptap ul[data-type="taskList"] li > label { margin-top: 0.45em; }
-.tiptap ul[data-type="taskList"] li > div { flex: 1; }
-.tiptap ul[data-type="taskList"] input { accent-color: var(--accent); width: 1.05em; height: 1.05em; }
-.tiptap .tableWrapper { overflow-x: auto; }
-.tiptap table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 0.95em; }
-.tiptap th, .tiptap td { border: 1px solid var(--line); padding: 6px 8px; vertical-align: top; min-width: 70px; }
-.tiptap th { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); text-align: left; }
-.tiptap .selectedCell { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-.callout { display: flex; gap: 10px; padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 9%, var(--surface)); border: 1px solid var(--line); }
-.callout::before { content: attr(data-icon); font-size: 1.2rem; line-height: 1.7; }
-.callout-body { flex: 1; min-width: 0; }
-.callout-body > * + * { margin-top: 0.4em; }
-.toggle { position: relative; padding-left: 24px; }
-.toggle-btn { position: absolute; left: 0; top: 0.25em; background: none; border: 0; padding: 0 6px; color: var(--muted); font-size: 1rem; }
-.toggle-content > :first-child { font-weight: 600; }
-.toggle[data-open="false"] .toggle-content > :not(:first-child) { display: none; }
-.img-wrap { display: block; }
-.img-box { position: relative; display: inline-block; max-width: 100%; }
-.img-box img { display: block; width: 100%; height: auto; border-radius: 8px; }
-.img-handle { position: absolute; right: -8px; bottom: -8px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); border: 3px solid var(--bg); cursor: nwse-resize; touch-action: none; }
-.img-box:hover .img-handle, .img-wrap[data-selected="true"] .img-handle { opacity: 1; }
-.file-card { display: inline-block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; text-decoration: none; background: var(--surface); font-family: system-ui, sans-serif; }
-
-.dock {
-  position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); z-index: 30;
-  display: flex; gap: 2px; overflow-x: auto; padding: 6px 10px;
-  background: var(--surface); border-top: 1px solid var(--line);
-}
-.dock button { background: transparent; border: 0; color: var(--ink); min-width: 42px; height: 40px; padding: 0 8px; font-size: 1rem; flex: 0 0 auto; }
-.dock button.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.dock button:disabled { opacity: 0.3; }
-.sheet {
-  position: fixed; left: 0; right: 0; bottom: calc(var(--kb, 0px) + 53px); z-index: 29;
-  max-height: 50vh; overflow-y: auto; padding: 12px 14px 14px;
-  background: var(--surface); border-top: 1px solid var(--line); box-shadow: 0 -8px 24px rgb(0 0 0 / 0.08);
-}
-.sheet-row, .sheet-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
-.sheet-label { margin: 4px 0 6px; font-size: 0.82rem; color: var(--muted); }
-.chip { background: var(--bg); border: 1px solid var(--line); color: var(--ink); padding: 7px 11px; border-radius: 8px; font-size: 0.92rem; }
-.chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-.swatch { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--line); padding: 0; }
-.bubble { display: flex; gap: 2px; padding: 4px; border-radius: 10px; background: var(--ink); box-shadow: 0 6px 20px rgb(0 0 0 / 0.25); }
-.bubble button { background: transparent; border: 0; color: var(--bg); min-width: 34px; height: 34px; padding: 0 6px; border-radius: 6px; }
-.bubble button.on { background: var(--accent); color: var(--accent-ink); }
-.slash { position: fixed; z-index: 40; width: 260px; max-height: 240px; overflow-y: auto; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 24px rgb(0 0 0 / 0.12); }
-.slash-item { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: var(--ink); padding: 9px 10px; border-radius: 6px; }
-.slash-item.on { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.subpages { margin-top: 28px; }
-
-/* ---------- Passo 4: menu, painel e disciplinas ---------- */
-.mainnav { max-width: 720px; margin: 0 auto; padding: 0 20px 6px; display: flex; gap: 6px; overflow-x: auto; }
-.mainnav a { padding: 7px 12px; border-radius: 999px; text-decoration: none; color: var(--muted); white-space: nowrap; font-size: 0.95rem; }
-.mainnav a.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
-
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
-.dcard {
-  display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 14px;
-  background: color-mix(in srgb, var(--c, var(--accent)) 14%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--c, var(--accent)) 30%, var(--line));
-  text-decoration: none; min-height: 120px;
-}
-.dcard.link:hover { border-color: var(--c); }
-.dcard strong { font-size: 1.05rem; }
-.dcard .row { margin-top: auto; }
-.dicon { font-size: 1.7rem; line-height: 1; }
-.dicon.big { font-size: 2.6rem; }
-.subject-head { display: flex; align-items: center; gap: 12px; margin: 6px 0 16px; padding-bottom: 12px; border-bottom: 3px solid var(--c); }
-
-.panel { display: grid; gap: 4px; padding: 14px; margin: 12px 0 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
-.panel label, .link-existing { display: grid; gap: 6px; font-size: 0.9rem; color: var(--muted); }
-.panel input, .link-existing select, .topic-add input, .topics input, .icon-input {
-  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px;
-}
-.icon-input { width: 80px; }
-.swatch.picked { outline: 3px solid var(--ink); outline-offset: 2px; }
-.btn-link { display: inline-block; padding: 9px 14px; border-radius: 8px; text-decoration: none; }
-.link-existing { margin: 14px 0 0; }
-.topic-add { margin: 10px 0 14px; flex-wrap: nowrap; }
-.topic-add input { flex: 1; min-width: 0; }
-.topics { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.topics li { display: flex; gap: 8px; align-items: center; }
-.topics li input { flex: 1; min-width: 0; }
-.topics .open { background: var(--surface); color: var(--ink); font: inherit; white-space: nowrap; }
-.topics .open:disabled { opacity: 0.45; cursor: not-allowed; }
-.icon-del { background: transparent; border: 0; color: var(--muted); padding: 6px 8px; }
-
-/* ---------- Passo 5: PDF dentro do caderno, com anotações ---------- */
-.pdf-block { margin: 14px 0; }
-.pdfnb {
-  display: flex; flex-direction: column; overflow: hidden; outline: none;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 0.92rem; line-height: 1.3;
-  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
-}
-.pdfnb.full { position: fixed; inset: 0; z-index: 100; border: 0; border-radius: 0; }
-.pdfnb-bar {
-  display: flex; align-items: center; gap: 6px; padding: 6px 8px; overflow-x: auto;
-  border-bottom: 1px solid var(--line); background: var(--surface);
-}
-.pdfnb-bar > * { flex: 0 0 auto; }
-.pdfnb-name { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.pdfnb-page { min-width: 54px; text-align: center; color: var(--muted); }
-.pdfnb-sep { width: 1px; height: 22px; background: var(--line); }
-.pdfnb-status { color: var(--muted); font-size: 0.85rem; white-space: nowrap; padding-left: 4px; }
-.pdfnb-btn {
-  display: inline-flex; align-items: center; justify-content: center; min-width: 38px; height: 36px; padding: 0 10px;
-  background: transparent; color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
-  font-size: 0.9rem; text-decoration: none; white-space: nowrap;
-}
-.pdfnb-btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-.pdfnb-btn:disabled { opacity: 0.35; }
-.pdfnb-dot { display: block; border-radius: 50%; background: currentColor; }
-.pdfnb-msg { margin: 0; padding: 14px 16px; color: var(--muted); }
-.pdfnb-scroller {
-  position: relative; overflow: auto; height: min(78vh, 900px); overscroll-behavior: contain;
-  touch-action: none; background: color-mix(in srgb, var(--ink) 9%, var(--bg));
-}
-.pdfnb.full .pdfnb-scroller { height: auto; flex: 1; min-height: 0; }
-.pdfnb-scroller[data-tool="hand"], .pdfnb-scroller[data-tool="note"] { cursor: grab; }
-.pdfnb-inner {
-  position: relative; display: flex; flex-direction: column; align-items: center; gap: 14px;
-  min-width: 100%; width: max-content; padding: 12px;
-}
-.pdfpage { position: relative; flex: 0 0 auto; background: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / 0.28); }
-.pdfpage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-.pdfpage-live { touch-action: none; cursor: crosshair; }
-.pdfpage-live[data-tool="eraser"] { cursor: cell; }
-.pdfpage-wait { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa6b4; font-size: 0.9rem; }
-.pdfnote-pin {
-  position: absolute; z-index: 5; transform: translate(-50%, -100%); width: 30px; height: 30px; padding: 0;
-  border-radius: 50% 50% 50% 4px; border: 2px solid #fff; font-size: 0.95rem; line-height: 1;
-  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35); color: #1b2430;
-}
-.pdfnote-pop {
-  position: absolute; z-index: 6; width: min(260px, 72%); padding: 8px; display: grid; gap: 8px;
-  background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 10px;
-  box-shadow: 0 10px 30px rgb(0 0 0 / 0.25);
-}
-.pdfnote-pop textarea {
-  width: 100%; resize: vertical; font: inherit; color: var(--ink); background: var(--bg);
-  border: 1px solid var(--line); border-radius: 8px; padding: 8px; -webkit-user-select: text; user-select: text;
-}
-.pdfnote-actions { display: flex; justify-content: flex-end; gap: 8px; }
-
-/* Exportação da anotação para PDF */
-.dock button.pdf-export-btn,
-.bubble button.pdf-export-bubble {
-  background: linear-gradient(180deg, #0f766e 0%, #0b5d58 100%);
-  color: #ffffff;
-  border: 1px solid rgba(15, 118, 110, 0.7);
-  border-radius: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  transition: filter 0.18s ease, transform 0.18s ease;
-}
-.dock button.pdf-export-btn:hover,
-.bubble button.pdf-export-bubble:hover {
-  filter: brightness(1.04);
-  transform: translateY(-1px);
-}
-.dock button.pdf-export-btn:active,
-.bubble button.pdf-export-bubble:active {
-  transform: translateY(0);
-}
-.dock button.pdf-export-btn { min-width: 54px; padding: 0 12px; }
-.bubble button.pdf-export-bubble { min-width: 42px; height: 34px; padding: 0 10px; border-radius: 8px; }
-
-/* ---------- Transcritor de reuniões Mednotes ---------- */
-.meeting-page {
-  display: grid;
-  gap: 18px;
-  padding-bottom: 32px;
-}
-
-.meeting-heading { margin: 4px 0; }
-.meeting-eyebrow, .meeting-step {
-  color: var(--accent);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-}
-
-.meeting-heading h1 {
-  margin: 7px 0 8px;
-  font-size: clamp(1.8rem, 6vw, 2.35rem);
-}
-
-.meeting-heading p,
-.meeting-card-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.92rem;
-}
-
-.meeting-card {
-  padding: 20px;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  background: var(--surface);
-  box-shadow: 0 8px 24px rgb(30 55 75 / 0.045);
-}
-
-.meeting-card h2 {
-  margin: 4px 0 5px;
-  font-size: 1.15rem;
-}
-
-.meeting-card-heading,
-.meeting-results-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.meeting-live,
-.meeting-ready {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  flex: 0 0 auto;
-  padding: 5px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 0.76rem;
-}
-
-.meeting-live i,
-.meeting-ready i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #8b96a3;
-}
-
-.meeting-live {
-  color: #b42318;
-}
-
-.meeting-live i {
-  background: #d92d20;
-  animation: meeting-pulse 1s infinite;
-}
-
-.meeting-recorder {
-  display: grid;
-  justify-items: center;
-  gap: 9px;
-  margin: 18px 0 14px;
-  padding: 24px 14px 20px;
-  border-radius: 14px;
-  background: var(--bg);
-}
-
-.meeting-wave {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 48px;
-  width: 100%;
-  overflow: hidden;
-}
-
-.meeting-wave span {
-  width: 4px;
-  height: 8px;
-  border-radius: 8px;
-  background: var(--accent);
-  opacity: 0.42;
-}
-
-.meeting-recorder.is-recording .meeting-wave span {
-  animation: meeting-wave 0.65s ease-in-out infinite alternate;
-  opacity: 0.95;
-}
-
-.meeting-timer {
-  font-variant-numeric: tabular-nums;
-  font-size: 1.75rem;
-  letter-spacing: 0.04em;
-}
-
-.meeting-recorder > p {
-  margin: 0 0 5px;
-  color: var(--muted);
-  font-size: 0.85rem;
-  text-align: center;
-}
-
-.meeting-start,
-.meeting-stop {
-  min-height: 43px;
-  padding: 9px 18px;
-}
-
-.meeting-stop {
-  background: #b42318;
-  color: white;
-}
-
-.meeting-consent {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  color: var(--muted);
-  font-size: 0.82rem;
-}
-
-.meeting-consent input {
-  margin-top: 4px;
-  accent-color: var(--accent);
-}
-
-.meeting-hint {
-  margin: 8px 0 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.meeting-audio-preview {
-  display: grid;
-  gap: 9px;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-}
-
-.meeting-audio-preview label,
-.meeting-prompt-label {
-  font-size: 0.86rem;
-  font-weight: 600;
-}
-
-.meeting-audio-preview audio {
-  width: 100%;
-}
-
-.meeting-prompt-label {
-  display: block;
-  margin: 14px 0 7px;
-}
-
-.meeting-card textarea {
-  display: block;
-  width: 100%;
-  resize: vertical;
-  min-height: 100px;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--bg);
-  color: var(--ink);
-  font: inherit;
-  font-size: 0.9rem;
-}
-
-.meeting-process {
-  width: 100%;
-  margin-top: 13px;
-  min-height: 44px;
-}
-
-.meeting-status {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin: 12px 0 0;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.meeting-spinner {
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  border: 2px solid var(--line);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: meeting-spin 0.8s linear infinite;
-}
-
-.meeting-results-heading {
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 15px;
-}
-
-.meeting-results-heading .row { gap: 7px; }
-.meeting-results-heading button {
-  padding: 7px 10px;
-  font-size: 0.8rem;
-}
-
-.meeting-summary h3 {
-  margin: 0 0 10px;
-  font-size: 1rem;
-}
-
-.meeting-output {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.7;
-  font-size: 0.92rem;
-}
-
-.meeting-transcript {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-}
-
-.meeting-transcript summary {
-  cursor: pointer;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-
-.meeting-privacy {
-  margin: 0 2px;
-  color: var(--muted);
-  font-size: 0.76rem;
-  line-height: 1.5;
-}
-
-@keyframes meeting-wave {
-  from { transform: scaleY(0.45); }
-  to { transform: scaleY(3.4); }
-}
-
-@keyframes meeting-spin {
-  to { transform: rotate(360deg); }
-}
-
-@keyframes meeting-pulse {
-  50% { opacity: 0.3; }
-}
-
-@media (max-width: 560px) {
-  .meeting-card {
-    padding: 15px;
-    border-radius: 15px;
+  function save(patch: Record<string, unknown>) {
+    pending.current = { ...pending.current, ...patch };
+    setStatus("saving");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => flushRef.current(), 800);
   }
 
-  .meeting-results-heading { align-items: flex-start; }
-  .meeting-results-heading .row { width: 100%; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .meeting-wave span,
-  .meeting-spinner,
-  .meeting-live i {
-    animation: none;
+  function update(patch: Partial<PageRow>) {
+    setPage((p) => (p ? { ...p, ...patch } : p));
+    save(patch);
   }
+
+  function insertAssistantText(text: string) {
+    if (!page) return;
+    const doc = toDoc(page.content);
+    const paragraphs: JSONContent[] = text.split(/\n+/).map((line) => ({
+      type: "paragraph",
+      content: line.trim() ? [{ type: "text", text: line.trim() }] : [],
+    }));
+    const content = [...(doc.content ?? []), ...paragraphs];
+    const next = { ...doc, content };
+    setPage((current) => current ? { ...current, content: next } : current);
+    save({ content: next });
+    setEditorVersion((version) => version + 1);
+  }
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flushRef.current();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+      if (timer.current) clearTimeout(timer.current);
+      flushRef.current();
+    };
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
+      if (!row) return setNotFound(true);
+      const current = row as PageRow;
+      setPage(current);
+
+      const { data: kids } = await supabase
+        .from("pages")
+        .select("*")
+        .eq("parent_id", id)
+        .order("position")
+        .order("created_at");
+      setChildren((kids ?? []) as PageRow[]);
+
+      const trail: Crumb[] = [];
+      let parent = current.parent_id;
+      for (let i = 0; i < 10 && parent; i++) {
+        const { data: p } = await supabase.from("pages").select("id,title,parent_id").eq("id", parent).maybeSingle();
+        if (!p) break;
+        trail.unshift({ id: p.id, title: p.title });
+        parent = p.parent_id;
+      }
+      setCrumbs(trail);
+    })();
+  }, [id]);
+
+  async function addChild(kind: "lesson" | "page") {
+    const row =
+      kind === "lesson"
+        ? { title: "Nova aula / tema", type: "lesson", content: LESSON_TEMPLATE }
+        : { title: "Nova página", type: "page" };
+    const { data, error } = await supabase
+      .from("pages")
+      .insert({ ...row, parent_id: id })
+      .select("id")
+      .single();
+    if (error || !data) return setError("Não foi possível criar a página.");
+    router.push(`/p/${data.id}`);
+  }
+
+  async function updateChild(childId: string, patch: Partial<PageRow>) {
+    const { error } = await supabase.from("pages").update(patch).eq("id", childId);
+    if (error) setError("Não foi possível salvar a alteração na tabela.");
+  }
+
+  function editChildLocal(childId: string, patch: Partial<PageRow>) {
+    setChildren((list) => list.map((c) => (c.id === childId ? { ...c, ...patch } : c)));
+  }
+
+  async function onCover(file: File | undefined) {
+    if (!file) return;
+    try {
+      update({ cover_url: await uploadFile(file) });
+    } catch {
+      setError("Não foi possível enviar a capa. Confira se rodou o schema2.sql no Supabase.");
+    }
+  }
+
+  async function remove() {
+    if (!page) return;
+    const ok = window.confirm(
+      children.length > 0
+        ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito."
+        : "Excluir esta página? Isso não pode ser desfeito."
+    );
+    if (!ok) return;
+    pending.current = {};
+    const { error } = await supabase.from("pages").delete().eq("id", id);
+    if (error) return setError("Não foi possível excluir.");
+    router.push(page.parent_id ? `/p/${page.parent_id}` : "/");
+  }
+
+  if (notFound) return <p className="empty">Página não encontrada. <Link href="/">Voltar ao início</Link></p>;
+  if (!page) return <p className="muted">Carregando…</p>;
+
+  const isLesson = page.type === "lesson";
+  const sourceText = extractPageText(page.content);
+
+  const table = (
+    <section className="subpages">
+      <div className="head">
+        <h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2>
+        <div className="row">
+          <button className="primary" onClick={() => addChild("lesson")}>Nova aula</button>
+          <button className="secondary" onClick={() => addChild("page")}>Nova página</button>
+        </div>
+      </div>
+      {children.length === 0 ? (
+        <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p>
+      ) : (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr><th>Aula / tema</th><th>Data</th><th></th></tr>
+            </thead>
+            <tbody>
+              {children.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <input
+                      value={c.title}
+                      aria-label="Título"
+                      onChange={(e) => editChildLocal(c.id, { title: e.target.value })}
+                      onBlur={(e) => updateChild(c.id, { title: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="date"
+                      value={c.props?.date ?? ""}
+                      aria-label="Data"
+                      onChange={(e) => {
+                        const props = { ...c.props, date: e.target.value };
+                        editChildLocal(c.id, { props });
+                        updateChild(c.id, { props });
+                      }}
+                    />
+                  </td>
+                  <td><Link className="open" href={`/p/${c.id}`}>Abrir</Link></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+
+  const editor = (
+    <Editor
+      key={`${page.id}-${editorVersion}`}
+      initial={toDoc(page.content)}
+      onChange={(doc: JSONContent) => {
+        setPage((current) => current ? { ...current, content: doc } : current);
+        save({ content: doc });
+      }}
+    />
+  );
+
+  return (
+    <>
+      <nav className="crumbs" aria-label="Caminho">
+        <Link href="/">Início</Link>
+        {crumbs.map((c) => (
+          <span key={c.id}>
+            <span className="sep">/</span>
+            <Link href={`/p/${c.id}`}>{c.title || "Sem título"}</Link>
+          </span>
+        ))}
+      </nav>
+
+      {page.cover_url ? (
+        <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }}>
+          <div className="cover-actions">
+            <button className="secondary" onClick={() => coverInput.current?.click()}>Trocar capa</button>
+            <button className="secondary" onClick={() => update({ cover_url: null })}>Remover</button>
+          </div>
+        </div>
+      ) : (
+        <button className="secondary small-btn" onClick={() => coverInput.current?.click()}>Adicionar capa</button>
+      )}
+      <input ref={coverInput} type="file" accept="image/*" hidden onChange={(e) => { onCover(e.target.files?.[0]); e.target.value = ""; }} />
+
+      <div className="titlebar">
+        {page.icon && (
+          <button
+            className="icon-btn"
+            aria-label="Trocar ícone"
+            onClick={() => {
+              const v = window.prompt("Digite um emoji para o ícone", page.icon ?? "");
+              if (v !== null) update({ icon: v.trim() || null });
+            }}
+          >
+            {page.icon}
+          </button>
+        )}
+
+        <input
+          className="title-input display"
+          value={page.title}
+          placeholder="Sem título"
+          onChange={(e) => update({ title: e.target.value })}
+          aria-label="Título da página"
+        />
+      </div>
+
+      <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
+      {error && <p className="notice">{error}</p>}
+
+      {isLesson && (
+        <div className="props">
+          <label>Data
+            <input type="date" value={page.props?.date ?? ""} onChange={(e) => update({ props: { ...page.props, date: e.target.value } })} />
+          </label>
+          <label>Disciplina
+            <input value={page.props?.discipline ?? ""} placeholder="Ex.: Tutoria" onChange={(e) => update({ props: { ...page.props, discipline: e.target.value } })} />
+          </label>
+          <label>Sala
+            <input value={page.props?.room ?? ""} placeholder="Ex.: 314 — Bloco D" onChange={(e) => update({ props: { ...page.props, room: e.target.value } })} />
+          </label>
+        </div>
+      )}
+
+      {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
+
+      <StudyWorkspace pageId={page.id} pageTitle={page.title} sourceText={sourceText} />
+      <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
+
+      <button className="danger" onClick={remove}>Excluir página</button>
+    </>
+  );
 }

@@ -1,246 +1,165 @@
-"use client";
-
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import HomeChat from "@/components/HomeChat";
 import { supabase } from "@/lib/supabase";
-import type { PageRow, StudyTask, Subject } from "@/lib/types";
+import type { StudyMaterial } from "@/lib/study";
 
-function dateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function mondayOf(date: Date) {
-  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
-  return monday;
-}
-
-export default function Dashboard() {
-  const [subjects, setSubjects] = useState<Subject[] | null>(null);
-  const [notebooks, setNotebooks] = useState<PageRow[]>([]);
-  const [tasks, setTasks] = useState<StudyTask[]>([]);
+export default function ReviewPage() {
+  const [items, setItems] = useState<StudyMaterial[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<"all" | "flashcard" | "question">("all");
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const weekStart = mondayOf(new Date());
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekEnd.getDate() + 6);
-
+    let active = true;
     (async () => {
-      const [subjectResult, notebookResult, taskResult] = await Promise.all([
-        supabase.from("subjects").select("*").order("position").order("created_at"),
-        supabase
-          .from("pages")
-          .select("id,title,icon,type,parent_id,cover_url,content,props,position,created_at,updated_at")
-          .eq("type", "notebook")
-          .is("parent_id", null)
-          .order("created_at", { ascending: true }),
-        supabase
-          .from("study_tasks")
-          .select("*")
-          .gte("scheduled_date", dateKey(weekStart))
-          .lte("scheduled_date", dateKey(weekEnd))
-          .order("time_label"),
-      ]);
+      const { data, error: loadError } = await supabase
+        .from("study_materials")
+        .select("*")
+        .order("next_review_at", { ascending: true, nullsFirst: false })
+        .order("created_at", { ascending: false });
 
-      if (subjectResult.error || notebookResult.error || taskResult.error) {
-        setError("Não foi possível carregar seu espaço. Confira se as tabelas do app estão configuradas no Supabase.");
-        setSubjects([]);
-        return;
+      if (!active) return;
+      if (loadError) {
+        setError("Não foi possível carregar a revisão. Verifique se a tabela study_materials foi criada no Supabase.");
+      } else {
+        setItems((data ?? []) as StudyMaterial[]);
       }
-
-      setSubjects((subjectResult.data ?? []) as Subject[]);
-      setNotebooks((notebookResult.data ?? []) as PageRow[]);
-      setTasks((taskResult.data ?? []) as StudyTask[]);
+      setLoading(false);
     })();
+
+    return () => { active = false; };
   }, []);
 
-  const today = dateKey(new Date());
-  const todaysTasks = tasks
-    .filter((task) => task.scheduled_date === today)
-    .sort((a, b) => a.time_label.localeCompare(b.time_label));
-  const done = tasks.filter((task) => task.completed).length;
-  const progress = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
-  const subjectNames = new Map((subjects ?? []).map((subject) => [subject.id, subject.name]));
+  async function mark(item: StudyMaterial, correct: boolean) {
+    const outcome = {
+      ease: correct ? Math.min(3.5, (item.ease || 2.5) + 0.15) : Math.max(1.2, (item.ease || 2.5) - 0.25),
+      interval: correct ? Math.max(2, (item.interval_days || 1) + 1) : 1,
+      mastery: Math.min(100, Math.max(0, item.mastery + (correct ? 18 : -24))),
+    };
+
+    const now = new Date().toISOString();
+    const dueAt = new Date(Date.now() + outcome.interval * 24 * 60 * 60 * 1000).toISOString();
+
+    const { error: updateError } = await supabase.from("study_materials").update({
+      ease: outcome.ease,
+      interval_days: outcome.interval,
+      mastery: outcome.mastery,
+      due_at: dueAt,
+      next_review_at: dueAt,
+      last_reviewed_at: now,
+      correct_count: item.correct_count + (correct ? 1 : 0),
+      incorrect_count: item.incorrect_count + (correct ? 0 : 1),
+      updated_at: now,
+    }).eq("id", item.id);
+
+    if (updateError) {
+      setError("Não foi possível registrar a revisão.");
+      return;
+    }
+
+    setItems((current) => current.map((row) => row.id === item.id ? {
+      ...row,
+      ease: outcome.ease,
+      interval_days: outcome.interval,
+      mastery: outcome.mastery,
+      due_at: dueAt,
+      next_review_at: dueAt,
+      last_reviewed_at: now,
+      correct_count: row.correct_count + (correct ? 1 : 0),
+      incorrect_count: row.incorrect_count + (correct ? 0 : 1),
+      updated_at: now,
+    } : row));
+    setRevealed((current) => ({ ...current, [item.id]: true }));
+  }
+
+  const filtered = items.filter((item) => filter === "all" || item.type === filter);
 
   return (
-    <div className="dashboard-page">
-      <section className="welcome-card">
-        <div className="welcome-copy">
-          <span className="eyebrow">SEU ESPAÇO DE APRENDIZAGEM</span>
-          <h1 className="display">Estude com mais clareza.</h1>
-          <p>Suas anotações, disciplinas e planos de estudo em um só lugar.</p>
-          <Link className="welcome-action" href="/planejamento">
-            Organizar minha semana <span aria-hidden="true">→</span>
-          </Link>
+    <div className="shell review-page">
+      <div className="head">
+        <div>
+          <span className="eyebrow">REVISÃO</span>
+          <h1 className="display">Painel de revisão</h1>
         </div>
-        <div className="welcome-art" aria-hidden="true">
-          <span>✦</span>
-          <i>✎</i>
-          <b>◷</b>
-        </div>
-      </section>
+        <Link className="secondary" href="/">Voltar ao início</Link>
+      </div>
 
-      <HomeChat />
       {error && <p className="notice">{error}</p>}
 
-      <section className="workspace-section" aria-labelledby="workspace-title">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">COMECE POR AQUI</span>
-            <h2 id="workspace-title">Meu espaço</h2>
-          </div>
-          <span className="section-hint">Tudo para manter seus estudos em movimento</span>
+      <div className="study-toggle review-filters">
+        <button type="button" className={filter === "all" ? "chip on" : "chip"} onClick={() => setFilter("all")}>Tudo</button>
+        <button type="button" className={filter === "flashcard" ? "chip on" : "chip"} onClick={() => setFilter("flashcard")}>Flashcards</button>
+        <button type="button" className={filter === "question" ? "chip on" : "chip"} onClick={() => setFilter("question")}>Questões</button>
+      </div>
+
+      {loading ? (
+        <p className="muted">Carregando revisão…</p>
+      ) : filtered.length === 0 ? (
+        <div className="study-empty">
+          <p>Nenhum item pendente de revisão.</p>
+          <span>Use o gerador de flashcards e questões nos cadernos para popular sua fila.</span>
         </div>
-        <div className="workspace-grid">
-          <Link href="/cadernos" className="workspace-card workspace-notes">
-            <span className="workspace-icon" aria-hidden="true">▤</span>
-            <span className="workspace-label">ANOTAÇÕES</span>
-            <strong>Cadernos</strong>
-            <span>Matérias, aulas e resumos em um só lugar.</span>
-            <span className="workspace-link">
-              Abrir cadernos <b aria-hidden="true">↗</b>
-            </span>
-          </Link>
+      ) : (
+        <div className="study-grid review-grid">
+          {filtered.map((item) => {
+            const show = !!revealed[item.id];
 
-          <Link href="/disciplinas" className="workspace-card workspace-subjects">
-            <span className="workspace-icon" aria-hidden="true">✳</span>
-            <span className="workspace-label">SEU CONTEÚDO</span>
-            <strong>Disciplinas</strong>
-            <span>Organize temas e acesse cada caderno.</span>
-            <span className="workspace-link">
-              Ver disciplinas <b aria-hidden="true">↗</b>
-            </span>
-          </Link>
+            return (
+              <article key={item.id} className="study-card review-card">
+                <div className="study-card-head">
+                  <span className={item.type === "flashcard" ? "study-pill accent" : "study-pill"}>{item.type === "flashcard" ? "Flashcard" : "Questão"}</span>
+                  <small>{item.mastery}%</small>
+                </div>
 
-          <Link href="/planejamento" className="workspace-card workspace-planner">
-            <span className="workspace-icon" aria-hidden="true">▦</span>
-            <span className="workspace-label">PRÓXIMOS PASSOS</span>
-            <strong>Planejamento semanal</strong>
-            <span>Transforme seus objetivos em uma rotina possível.</span>
-            <span className="workspace-link">
-              Planejar estudos <b aria-hidden="true">↗</b>
-            </span>
-          </Link>
+                <h3>{item.title}</h3>
+                <p className="study-prompt">{item.prompt}</p>
 
-          <Link href="/reunioes" className="workspace-card workspace-planner">
-            <span className="workspace-icon" aria-hidden="true">🎙</span>
-            <span className="workspace-label">INTELIGÊNCIA ARTIFICIAL</span>
-            <strong>Anotações IA</strong>
-            <span>Grave reuniões e transforme áudio em anotações organizadas.</span>
-            <span className="workspace-link">
-              Abrir transcritor <b aria-hidden="true">↗</b>
-            </span>
-          </Link>
+                {item.type === "question" ? (
+                  <>
+                    {item.options?.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className="study-option"
+                        onClick={() => !show && void mark(item, option === item.correct_option)}
+                      >
+                        {option}
+                      </button>
+                    ))}
+
+                    {show && (
+                      <div className="study-answer-box">
+                        <strong>Resposta correta:</strong> {item.correct_option ?? item.answer}
+                        {item.explanation && <p>{item.explanation}</p>}
+                        <div className="study-actions">
+                          <button type="button" className="chip on" onClick={() => void mark(item, true)}>Acertou</button>
+                          <button type="button" className="chip" onClick={() => void mark(item, false)}>Errei</button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {!show ? (
+                      <button type="button" className="secondary" onClick={() => setRevealed((current) => ({ ...current, [item.id]: true }))}>Revelar resposta</button>
+                    ) : (
+                      <div className="study-answer-box">
+                        <strong>Resposta:</strong>
+                        <p>{item.answer}</p>
+                        {item.explanation && <p>{item.explanation}</p>}
+                        <div className="study-actions">
+                          <button type="button" className="chip on" onClick={() => void mark(item, true)}>Acertou</button>
+                          <button type="button" className="chip" onClick={() => void mark(item, false)}>Errei</button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </article>
+            );
+          })}
         </div>
-      </section>
-
-      <section className="dashboard-lower">
-        <div className="today-panel">
-          <div className="section-heading compact-heading">
-            <div>
-              <span className="eyebrow">SEU DIA</span>
-              <h2>Hoje</h2>
-            </div>
-            <Link href="/planejamento" className="text-link">
-              Ver semana <span aria-hidden="true">→</span>
-            </Link>
-          </div>
-
-          {todaysTasks.length ? (
-            <ul className="today-list">
-              {todaysTasks.slice(0, 4).map((task) => (
-                <li
-                  key={task.id}
-                  className={task.completed ? "today-task is-done" : "today-task"}
-                >
-                  <span className="today-dot" aria-hidden="true">
-                    {task.completed ? "✓" : ""}
-                  </span>
-                  <span className="today-time">{task.time_label}</span>
-                  <span className="today-task-copy">
-                    <strong>{task.title}</strong>
-                    <small>
-                      {subjectNames.get(task.subject_id ?? "") ?? "Disciplina removida"}
-                      {task.topic ? ` · ${task.topic}` : ""}
-                    </small>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="today-empty">
-              <span aria-hidden="true">☀</span>
-              <p>Um dia com espaço para aprender. Adicione uma atividade ao seu planejamento.</p>
-              <Link href="/planejamento">Montar minha semana</Link>
-            </div>
-          )}
-        </div>
-
-        <aside className="progress-panel">
-          <span className="eyebrow">RITMO DA SEMANA</span>
-          <h2>Um passo de cada vez.</h2>
-          <div className="progress-number">
-            <strong>{done}</strong>
-            <span>de {tasks.length} atividades concluídas</span>
-          </div>
-          <div
-            className="progress-track"
-            role="progressbar"
-            aria-label="Progresso das atividades nesta semana"
-            aria-valuenow={progress}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
-            <span style={{ width: `${progress}%` }} />
-          </div>
-          <p>
-            {tasks.length
-              ? `${progress}% da sua semana de estudos concluída`
-              : "Seu progresso aparece aqui quando planejar atividades."}
-          </p>
-          <Link href="/planejamento" className="progress-link">
-            Acompanhar planejamento <span aria-hidden="true">→</span>
-          </Link>
-        </aside>
-      </section>
-
-      {subjects?.length ? (
-        <section className="subject-shortcuts">
-          <div className="section-heading compact-heading">
-            <div>
-              <span className="eyebrow">SEUS TEMAS</span>
-              <h2>Continue de onde parou</h2>
-            </div>
-            <Link href="/disciplinas" className="text-link">
-              Todos <span aria-hidden="true">→</span>
-            </Link>
-          </div>
-          <div className="subject-shortcut-list">
-            {subjects.slice(0, 4).map((subject) => (
-              <Link
-                key={subject.id}
-                href={subject.notebook_page_id ? `/p/${subject.notebook_page_id}` : `/disciplinas/${subject.id}`}
-                className="subject-shortcut"
-              >
-                <span className="subject-shortcut-icon" aria-hidden="true">
-                  {subject.icon || "✦"}
-                </span>
-                <span>{subject.name}</span>
-              </Link>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      {notebooks.length > 0 && (
-        <p className="dashboard-footnote">
-          Seus cadernos recentes estão disponíveis em <Link href="/cadernos">Cadernos</Link>.
-        </p>
       )}
     </div>
   );

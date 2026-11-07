@@ -1,20 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { getReviewOutcome, extractPageText, type StudyMaterial } from "@/lib/study";
+import { getReviewOutcome, type StudyMaterial } from "@/lib/study";
 
 export default function StudyWorkspace({
   pageId,
   pageTitle,
-  subjectId,
-  subjectName,
   sourceText,
 }: {
   pageId: string | null;
   pageTitle: string;
-  subjectId?: string | null;
-  subjectName?: string | null;
   sourceText: string;
 }) {
   const [items, setItems] = useState<StudyMaterial[]>([]);
@@ -26,19 +22,18 @@ export default function StudyWorkspace({
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, string>>({});
 
-  const pageText = useMemo(() => (sourceText || "").trim(), [sourceText]);
-
   useEffect(() => {
     if (!pageId) return;
+
     let active = true;
+
     (async () => {
-      const query = supabase
+      const { data, error: loadError } = await supabase
         .from("study_materials")
         .select("*")
         .eq("page_id", pageId)
         .order("created_at", { ascending: false });
 
-      const { data, error: loadError } = await query;
       if (!active) return;
       if (loadError) {
         setError("Não foi possível carregar os materiais desta página.");
@@ -47,16 +42,42 @@ export default function StudyWorkspace({
       }
       setLoading(false);
     })();
+
     return () => { active = false; };
   }, [pageId]);
 
+  async function recordReview(material: StudyMaterial, correct: boolean) {
+    const outcome = getReviewOutcome(correct, material.ease || 2.5, material.interval_days || 1, material.mastery || 0);
+    const now = new Date().toISOString();
+    const patch = {
+      ease: outcome.ease,
+      interval_days: outcome.interval,
+      mastery: outcome.mastery,
+      due_at: outcome.nextDueAt,
+      next_review_at: outcome.nextDueAt,
+      last_reviewed_at: now,
+      correct_count: material.correct_count + (correct ? 1 : 0),
+      incorrect_count: material.incorrect_count + (correct ? 0 : 1),
+      updated_at: now,
+    };
+
+    const { error: updateError } = await supabase.from("study_materials").update(patch).eq("id", material.id);
+    if (updateError) {
+      setError("Não foi possível atualizar o histórico de revisão.");
+      return;
+    }
+
+    setItems((current) => current.map((row) => row.id === material.id ? { ...row, ...patch } : row));
+    setRevealed((current) => ({ ...current, [material.id]: true }));
+  }
+
   async function generateNow() {
-    if (!pageText) return setError("Adicione conteúdo na página antes de gerar revisões.");
+    if (!sourceText?.trim()) return setError("Adicione conteúdo na página antes de gerar materiais.");
     setBusy(true);
     setError(null);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) throw new Error("Faça login para gerar materiais.");
+      if (!session?.access_token) throw new Error("Faça login para gerar materiais de estudo.");
 
       const response = await fetch("/api/study/generate", {
         method: "POST",
@@ -67,11 +88,9 @@ export default function StudyWorkspace({
         body: JSON.stringify({
           type: mode,
           title: pageTitle,
-          pageId,
-          subjectId,
-          subjectName,
-          text: pageText,
+          text: sourceText,
           prompt,
+          pageId,
         }),
       });
 
@@ -81,13 +100,13 @@ export default function StudyWorkspace({
       const rows = payload.items.map((item) => ({
         page_id: pageId,
         page_title: pageTitle,
-        subject_id: subjectId,
-        subject_name: subjectName,
+        subject_id: null,
+        subject_name: null,
         type: mode,
         title: String(item.title ?? pageTitle),
         prompt: String(item.prompt ?? item.question ?? item.front ?? ""),
         answer: String(item.answer ?? item.back ?? item.correct_option ?? ""),
-        options: Array.isArray(item.options) ? (item.options as unknown[]).map((opt) => String(opt)) : null,
+        options: Array.isArray(item.options) ? (item.options as unknown[]).map((option) => String(option)) : null,
         correct_option: item.correct_option ? String(item.correct_option) : null,
         explanation: item.explanation ? String(item.explanation) : null,
         due_at: new Date().toISOString(),
@@ -102,6 +121,7 @@ export default function StudyWorkspace({
 
       const { data: inserted, error: insertError } = await supabase.from("study_materials").insert(rows).select("*");
       if (insertError || !inserted) throw new Error("Não foi possível salvar os materiais no banco.");
+
       setItems((current) => [...(inserted as StudyMaterial[]), ...current]);
       setError(null);
     } catch (cause) {
@@ -109,31 +129,6 @@ export default function StudyWorkspace({
     } finally {
       setBusy(false);
     }
-  }
-
-  async function recordReview(material: StudyMaterial, correct: boolean) {
-    const outcome = getReviewOutcome(correct, material.ease || 2.5, material.interval_days || 1, material.mastery || 0);
-    const patch = {
-      ease: outcome.ease,
-      interval_days: outcome.interval,
-      mastery: outcome.mastery,
-      due_at: outcome.nextDueAt,
-      next_review_at: outcome.nextDueAt,
-      last_reviewed_at: new Date().toISOString(),
-      correct_count: material.correct_count + (correct ? 1 : 0),
-      incorrect_count: material.incorrect_count + (correct ? 0 : 1),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { error: updateError } = await supabase.from("study_materials").update(patch).eq("id", material.id);
-    if (updateError) {
-      setError("Não foi possível atualizar o histórico de revisão.");
-      return;
-    }
-
-    setItems((current) => current.map((row) => row.id === material.id ? { ...row, ...patch } : row));
-    setRevealed((current) => ({ ...current, [material.id]: true }));
-    setSelected((current) => ({ ...current, [material.id]: correct ? material.correct_option ?? "" : current[material.id] ?? "" }));
   }
 
   if (!pageId) return null;
@@ -157,10 +152,11 @@ export default function StudyWorkspace({
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           rows={3}
-          placeholder="Ex.: Gere 6 flashcards focados em sinais clínicos e mecanismos importantes."
+          placeholder="Ex.: Gere 5 flashcards focados nos pontos mais importantes deste conteúdo."
         />
+
         <div className="row">
-          <button type="button" className="primary" disabled={busy || !pageText} onClick={generateNow}>
+          <button type="button" className="primary" disabled={busy || !sourceText.trim()} onClick={() => void generateNow()}>
             {busy ? "Gerando…" : `Gerar ${mode === "flashcard" ? "flashcards" : "questões"}`}
           </button>
         </div>
@@ -194,24 +190,22 @@ export default function StudyWorkspace({
 
                 {isQuestion ? (
                   <div className="study-options">
-                    {options.map((option) => {
-                      const active = selected[material.id] === option;
-                      return (
-                        <button
-                          key={option}
-                          type="button"
-                          className={active ? "study-option selected" : "study-option"}
-                          onClick={() => {
-                            setSelected((current) => ({ ...current, [material.id]: option }));
-                            if (showAnswer) return;
-                            const correct = option === material.correct_option;
-                            void recordReview(material, correct);
-                          }}
-                        >
-                          {option}
-                        </button>
-                      );
-                    })}
+                    {options.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className={selected[material.id] === option ? "study-option selected" : "study-option"}
+                        onClick={async () => {
+                          const correct = option === material.correct_option;
+                          setSelected((current) => ({ ...current, [material.id]: option }));
+                          setRevealed((current) => ({ ...current, [material.id]: true }));
+                          await recordReview(material, correct);
+                        }}
+                      >
+                        {option}
+                      </button>
+                    ))}
+
                     {showAnswer && (
                       <div className="study-answer-box">
                         <strong>Resposta correta:</strong> {material.correct_option ?? material.answer}
@@ -221,12 +215,11 @@ export default function StudyWorkspace({
                   </div>
                 ) : (
                   <>
-                    {!showAnswer && (
+                    {!showAnswer ? (
                       <button type="button" className="secondary" onClick={() => setRevealed((current) => ({ ...current, [material.id]: true }))}>
                         Revelar resposta
                       </button>
-                    )}
-                    {showAnswer && (
+                    ) : (
                       <div className="study-answer-box">
                         <strong>Resposta:</strong>
                         <p>{material.answer}</p>
@@ -238,13 +231,6 @@ export default function StudyWorkspace({
                       </div>
                     )}
                   </>
-                )}
-
-                {isQuestion && showAnswer && (
-                  <div className="study-actions">
-                    <button type="button" className="chip on" onClick={() => void recordReview(material, true)}>Acertou</button>
-                    <button type="button" className="chip" onClick={() => void recordReview(material, false)}>Errei</button>
-                  </div>
                 )}
               </article>
             );
