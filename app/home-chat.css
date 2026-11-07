@@ -45,3 +45,18 @@
 @media (prefers-reduced-motion: reduce) {
   .home-chat-loading i, .home-chat-spinner { animation: none; }
 }
+
+/* histórico de conversas */
+.home-chat-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: -4px 0 12px; }
+.home-chat-tool { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--ink); font-size: .8rem; }
+.home-chat-tool:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.home-chat-tool:disabled { opacity: .5; }
+.home-chat-history { display: grid; gap: 6px; max-height: 240px; margin: 0 0 12px; padding: 6px; overflow-y: auto; list-style: none; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.home-chat-history li { display: flex; align-items: center; gap: 4px; border-radius: 8px; }
+.home-chat-history li.is-active { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+.home-chat-history-open { display: grid; flex: 1; gap: 2px; min-width: 0; padding: 8px 10px; background: transparent; color: var(--ink); text-align: left; }
+.home-chat-history-open strong { overflow: hidden; font-size: .86rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.home-chat-history-open small, .home-chat-history-empty { color: var(--muted); font-size: .74rem; }
+.home-chat-history-empty { padding: 8px 10px; }
+.home-chat-history-delete { flex: 0 0 auto; width: 30px; height: 30px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 1.1rem; }
+.home-chat-history-delete:hover { color: var(--danger); }
