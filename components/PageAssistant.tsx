@@ -1,146 +1,265 @@
-"use client";
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Paperclip, Image as ImageIcon, Maximize2, Minimize2, X, FileText } from 'lucide-react';
+import Markdown from './Markdown';
 
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { JSONContent } from "@tiptap/core";
-import { supabase } from "@/lib/supabase";
-
-type ChatMessage = { role: "user" | "assistant"; content: string; insertText?: string | null };
-
-function pageText(node: JSONContent | undefined): string {
-  if (!node) return "";
-  if (node.type === "text") return node.text ?? "";
-  if (node.type === "fileCard") return `[PDF anexado: ${String(node.attrs?.name ?? "arquivo")}]`;
-  const parts = (node.content ?? []).map(pageText).filter(Boolean);
-  if (node.type === "paragraph" || node.type === "heading" || node.type === "listItem" || node.type === "tableCell" || node.type === "tableHeader") {
-    return parts.join("") + "\n";
-  }
-  return parts.join(node.type === "doc" ? "" : "\n");
+interface Message {
+  id: string;
+  sender: 'user' | 'maria';
+  text: string;
+  files?: { name: string; url: string; type: string }[];
+  timestamp: string;
 }
 
-export default function PageAssistant({
-  title,
-  content,
-  onInsert,
-}: {
-  title: string;
-  content: JSONContent;
-  onInsert: (text: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const contextText = useMemo(() => pageText(content).trim().slice(0, 20_000), [content]);
+export const PageAssistant: React.FC = () => {
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: '1',
+      sender: 'maria',
+      text: 'Olá, Yasmim! Sou a Maria, sua assistente acadêmica no Mednotes. Como posso ajudar nos seus estudos de Medicina hoje?',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    }
+  ]);
+  const [input, setInput] = useState('');
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modalTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Redimensionamento automático do textarea principal
   useEffect(() => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [messages, loading, open]);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+    }
+  }, [input]);
 
-  async function sendMessage(text: string) {
-    const prompt = text.trim();
-    if (!prompt || loading) return;
-    setDraft("");
-    setError(null);
-    const next = [...messages, { role: "user" as const, content: prompt }].slice(-12);
-    setMessages(next);
-    setLoading(true);
+  // Rolar para a última mensagem automaticamente
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      setAttachments((prev) => [...prev, ...Array.from(e.target.files!)]);
+    }
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSend = async () => {
+    if (!input.trim() && attachments.length === 0) return;
+
+    const userText = input;
+    const currentAttachments = [...attachments];
+
+    const newUserMessage: Message = {
+      id: Date.now().toString(),
+      sender: 'user',
+      text: userText,
+      files: currentAttachments.map((f) => ({ name: f.name, url: '', type: f.type })),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setMessages((prev) => [...prev, newUserMessage]);
+    setInput('');
+    setAttachments([]);
+    setIsExpanded(false);
+    setIsLoading(true);
+
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) throw new Error("Sua sessão expirou. Entre novamente para continuar.");
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({
-          messages: next.map(({ role, content: message }) => ({ role, content: message })),
-          pageContext: { title: title.slice(0, 300), text: contextText },
-        }),
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userText, history: messages })
       });
-      const result = await response.json() as { message?: string; insertText?: string | null; error?: string };
-      if (!response.ok || !result.message) throw new Error(result.error ?? "Não foi possível enviar a mensagem.");
-      setMessages((current) => [...current, { role: "assistant" as const, content: result.message!, insertText: result.insertText ?? null }].slice(-12));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Ocorreu um erro. Tente novamente.");
+
+      const data = await response.json();
+
+      const newAssistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        sender: 'maria',
+        text: data.reply || 'Desculpe, ocorreu um erro ao processar sua pergunta.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+
+      setMessages((prev) => [...prev, newAssistantMessage]);
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          sender: 'maria',
+          text: 'Erro de conexão. Por favor, tente novamente.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ]);
     } finally {
-      setLoading(false);
-      inputRef.current?.focus();
+      setIsLoading(false);
     }
-  }
-
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void sendMessage(draft);
-  }
-
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      if (draft.trim() && !loading) void sendMessage(draft);
-    }
-  }
-
-  const panel: React.CSSProperties = {
-    position: "fixed",
-    right: 12,
-    bottom: "calc(var(--kb, 0px) + 108px)",
-    zIndex: 35,
-    width: "min(410px, calc(100vw - 24px))",
-    maxHeight: "min(68vh, 620px)",
-    display: open ? "flex" : "none",
-    flexDirection: "column",
-    gap: 12,
-    padding: 14,
-    color: "var(--ink)",
-    background: "var(--surface)",
-    border: "1px solid var(--line)",
-    borderRadius: 16,
-    boxShadow: "0 12px 40px rgb(0 0 0 / 0.2)",
   };
 
   return (
-    <>
-      <section style={panel} aria-label="Chat com assistente da página">
-        <header style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: "1px solid var(--line)", paddingBottom: 10 }}>
-          <span aria-hidden="true" style={{ color: "var(--accent)", fontSize: 22 }}>✦</span>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <strong>Assistente desta página</strong>
-            <div style={{ color: "var(--muted)", fontSize: 12 }}>Lê o texto do caderno e pode sugerir conteúdo</div>
-          </div>
-          <button type="button" className="secondary" aria-label="Fechar chat" onClick={() => setOpen(false)} style={{ padding: "4px 9px" }}>×</button>
-        </header>
-        <div ref={listRef} role="log" aria-live="polite" style={{ display: "grid", gap: 10, minHeight: 100, overflowY: "auto", padding: "2px 1px", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-          {messages.length === 0 ? (
-            <p className="muted" style={{ margin: "auto 0", fontSize: 14 }}>Pergunte sobre esta página ou peça um resumo, complemento ou lista de revisão.</p>
-          ) : messages.map((message, index) => (
-            <div key={`${index}-${message.role}`} style={{ justifySelf: message.role === "user" ? "end" : "stretch", maxWidth: "95%" }}>
-              <div style={{ padding: "9px 11px", borderRadius: 12, background: message.role === "user" ? "color-mix(in srgb, var(--accent) 12%, var(--surface))" : "var(--bg)", fontSize: 14, lineHeight: 1.5 }}>{message.content}</div>
-              {message.insertText && (
-                <button type="button" className="primary" style={{ marginTop: 7, padding: "7px 10px", fontSize: 13 }} onClick={() => { onInsert(message.insertText!); setMessages((current) => current.map((item, i) => i === index ? { ...item, insertText: null } : item)); }}>
-                  Inserir sugestão na página
-                </button>
+    <div className="flex flex-col h-full bg-slate-900 text-slate-100 rounded-xl overflow-hidden border border-slate-800">
+      {/* Mensagens */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
+          >
+            <div className="text-xs text-slate-400 mb-1">
+              {msg.sender === 'user' ? 'Você' : 'Maria'} • {msg.timestamp}
+            </div>
+            <div
+              className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                msg.sender === 'user'
+                  ? 'bg-blue-600 text-white rounded-tr-none'
+                  : 'bg-slate-800 text-slate-100 border border-slate-700 rounded-tl-none'
+              }`}
+            >
+              <Markdown content={msg.text} />
+              {msg.files && msg.files.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-slate-700/50 space-y-1">
+                  {msg.files.map((f, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs text-slate-300">
+                      <FileText size={14} />
+                      <span>{f.name}</span>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
+          </div>
+        ))}
+        {isLoading && (
+          <div className="flex items-center gap-2 text-slate-400 text-sm">
+            <div className="animate-spin rounded-full h-4 w-4 border-2 border-blue-500 border-t-transparent"></div>
+            <span>Maria está elaborando a resposta...</span>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Lista de Anexos pendentes */}
+      {attachments.length > 0 && (
+        <div className="px-4 py-2 bg-slate-800/80 border-t border-slate-800 flex flex-wrap gap-2">
+          {attachments.map((file, i) => (
+            <div key={i} className="flex items-center gap-2 bg-slate-700 px-3 py-1 rounded-lg text-xs">
+              <span className="truncate max-w-[150px]">{file.name}</span>
+              <button onClick={() => removeAttachment(i)} className="text-slate-400 hover:text-white">
+                <X size={14} />
+              </button>
+            </div>
           ))}
-          {loading && <p className="muted" role="status" style={{ margin: 0 }}>Preparando uma resposta…</p>}
         </div>
-        {error && <p role="alert" className="notice" style={{ margin: 0, fontSize: 13 }}>{error}</p>}
-        <form onSubmit={submit} style={{ display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid var(--line)", borderRadius: 12, padding: 7 }}>
-          <label htmlFor="page-assistant-input" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap", border: 0 }}>Escreva sua mensagem</label>
-          <textarea id="page-assistant-input" ref={inputRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} placeholder="Pergunte ou peça para adicionar algo…" rows={2} maxLength={4_000} disabled={loading} style={{ flex: 1, minWidth: 0, resize: "none", border: 0, outline: 0, background: "transparent", color: "var(--ink)", font: "inherit", fontSize: 14 }} />
-          <button type="submit" className="primary" aria-label="Enviar mensagem" disabled={loading || !draft.trim()} style={{ padding: "7px 12px" }}>{loading ? "…" : "↑"}</button>
-        </form>
-        <small style={{ color: "var(--muted)", fontSize: 11 }}>O conteúdo do caderno é enviado à Anthropic. PDFs anexados não são lidos nesta versão.</small>
-      </section>
-      <button
-        type="button"
-        className={open ? "primary" : "secondary"}
-        aria-expanded={open}
-        aria-label={open ? "Fechar assistente" : "Abrir assistente desta página"}
-        onClick={() => { setOpen((value) => !value); if (!open) setTimeout(() => inputRef.current?.focus(), 0); }}
-        style={{ position: "fixed", right: 14, bottom: "calc(var(--kb, 0px) + 58px)", zIndex: 36, borderRadius: 999, boxShadow: "0 4px 16px rgb(0 0 0 / 0.18)", fontWeight: 600 }}
-      >✦ {open ? "Fechar" : "Agente"}</button>
-    </>
+      )}
+
+      {/* Input / Controls */}
+      <div className="p-3 bg-slate-950 border-t border-slate-800 flex flex-col gap-2">
+        <div className="flex items-end gap-2 bg-slate-900 rounded-xl p-2 border border-slate-800 focus-within:border-blue-500 transition-all">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            multiple
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            title="Anexar arquivo"
+          >
+            <Paperclip size={18} />
+          </button>
+
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Digite sua dúvida acadêmica ou pressione Shift + Enter para nova linha..."
+            rows={1}
+            className="flex-1 bg-transparent border-0 resize-none outline-none text-slate-100 placeholder-slate-500 text-sm min-h-[36px] max-h-[200px] overflow-y-auto"
+          />
+
+          <button
+            type="button"
+            onClick={() => setIsExpanded(true)}
+            className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            title="Expandir campo de escrita"
+          >
+            <Maximize2 size={18} />
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!input.trim() && attachments.length === 0}
+            className="p-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded-lg transition-colors"
+          >
+            <Send size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* Modal / Área de Escrita Expandida */}
+      {isExpanded && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl h-[80vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
+              <h3 className="font-semibold text-slate-200">Editor Amplo de Comandos e Perguntas</h3>
+              <button
+                onClick={() => setIsExpanded(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                <Minimize2 size={20} />
+              </button>
+            </div>
+            <div className="flex-1 p-4 bg-slate-900">
+              <textarea
+                ref={modalTextareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Elabore perguntas complexas, adicione múltiplos parágrafos, casos clínicos ou comandos detalhados..."
+                className="w-full h-full bg-transparent text-slate-100 outline-none resize-none text-base placeholder-slate-600 leading-relaxed font-sans"
+              />
+            </div>
+            <div className="p-4 border-t border-slate-800 bg-slate-950 flex items-center justify-between">
+              <div className="text-xs text-slate-500">
+                {input.length} caracteres | {input.split(/\s+/).filter(Boolean).length} palavras
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setIsExpanded(false)}
+                  className="px-4 py-2 text-slate-300 hover:bg-slate-800 rounded-lg text-sm"
+                >
+                  Concluir Edição
+                </button>
+                <button
+                  onClick={handleSend}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-lg text-sm flex items-center gap-2"
+                >
+                  <Send size={16} /> Enviar Pergunta
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
-}
+};
