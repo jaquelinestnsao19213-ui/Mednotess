@@ -116,7 +116,7 @@ export default function PageAssistant({
       front: item.front,
       back: item.back,
       options: item.options,
-      correct_answer: item.correct_answer,
+      correct_answer: item.correct_answer || item.back,
       explanation: item.explanation,
       status: "new",
       last_reviewed_at: null,
