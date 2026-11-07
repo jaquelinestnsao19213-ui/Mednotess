@@ -590,3 +590,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
     animation: none;
   }
 }
+
+
+/* ---------- Site incorporado no caderno ---------- */
+.webnb-frame { display: block; width: 100%; border: 0; background: #fff; }
+.webnb.full .webnb-frame { flex: 1 1 auto; min-height: 0; }
+.webnb-msg { margin: 0; padding: 16px; color: var(--muted); }
+.webnb-note { margin: 0; padding: 8px 12px; font-size: 0.82rem; color: var(--muted); border-bottom: 1px solid var(--line); background: var(--surface); }
+.link-box { position: fixed; left: 0; right: 0; bottom: 0; z-index: 90; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px calc(14px + env(safe-area-inset-bottom)); }
+.link-box-label { font-size: 0.85rem; color: var(--muted); }
+.link-box-input { width: 100%; padding: 12px; font-size: 1rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); }
+.link-box-error { margin: 0; color: var(--danger); font-size: 0.85rem; }
