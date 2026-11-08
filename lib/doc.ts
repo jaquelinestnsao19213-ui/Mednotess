@@ -32,3 +32,25 @@ export const LESSON_TEMPLATE: JSONContent = {
     ...section("Materiais e referências"),
   ],
 };
+
+/** Texto simples de um documento do editor (usado para montar o material que a IA lê). */
+export function docToText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const n = node as { type?: string; text?: string; attrs?: Record<string, unknown>; content?: unknown[] };
+  if (n.type === "text") return n.text ?? "";
+  if (n.type === "fileCard") return `[PDF anexado: ${String(n.attrs?.name ?? "arquivo")}]\n`;
+  if (n.type === "webEmbed") return `[Site incorporado: ${String(n.attrs?.title || n.attrs?.url || "")}]\n`;
+  const inner = (n.content ?? []).map(docToText);
+  const text = n.type === "tableRow" ? inner.join(" | ") : inner.join("");
+  const blocks = ["paragraph", "heading", "listItem", "taskItem", "tableRow", "blockquote", "codeBlock"];
+  return n.type && blocks.includes(n.type) ? text + "\n" : text;
+}
+
+/** Endereços dos PDFs anexados numa página (nós "fileCard"). */
+export function docPdfUrls(node: unknown, found: { url: string; name: string }[] = []) {
+  if (!node || typeof node !== "object") return found;
+  const n = node as { type?: string; attrs?: Record<string, unknown>; content?: unknown[] };
+  if (n.type === "fileCard" && typeof n.attrs?.url === "string") found.push({ url: n.attrs.url, name: String(n.attrs.name ?? "arquivo") });
+  for (const child of n.content ?? []) docPdfUrls(child, found);
+  return found;
+}
