@@ -12,4 +12,4 @@ Cadernos com subpáginas, login e salvamento automático, usando Next.js + Supab
 1. Suba esta pasta para um repositório novo no GitHub.
 2. Na Vercel: Add New > Project > escolha o repositório.
 3. Em Environment Variables, adicione `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-4. Deploy.
+4. Deploy
