@@ -4,6 +4,7 @@ import Image from "@tiptap/extension-image";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import ImageView from "./ImageView";
 import PdfCardView from "./PdfCardView";
+import WebEmbedView from "./WebEmbedView";
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -204,6 +205,42 @@ export const FileCard = Node.create({
   addNodeView() {
     // stopEvent: o editor não interfere nos toques e na caneta dentro do leitor.
     return ReactNodeViewRenderer(PdfCardView, { stopEvent: () => true });
+  },
+});
+
+// Site incorporado: aparece dentro da página (ou em modo leitura, quando o site não permite).
+// O HTML de reserva continua sendo um link que abre o site em outra aba.
+export const WebEmbed = Node.create({
+  name: "webEmbed",
+  group: "block",
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes() {
+    return {
+      url: { default: "", rendered: false, parseHTML: (el: HTMLElement) => el.getAttribute("href") ?? "" },
+      title: { default: "", rendered: false, parseHTML: (el: HTMLElement) => el.getAttribute("data-title") ?? "" },
+    };
+  },
+  parseHTML() {
+    return [{ tag: "a[data-web-embed]" }];
+  },
+  renderHTML({ node, HTMLAttributes }) {
+    return [
+      "a",
+      mergeAttributes(HTMLAttributes, {
+        href: node.attrs.url,
+        target: "_blank",
+        rel: "noopener",
+        class: "file-card",
+        "data-web-embed": "",
+        "data-title": node.attrs.title,
+      }),
+      `🌐 ${node.attrs.title || node.attrs.url}`,
+    ];
+  },
+  addNodeView() {
+    return ReactNodeViewRenderer(WebEmbedView, { stopEvent: () => true });
   },
 });
 

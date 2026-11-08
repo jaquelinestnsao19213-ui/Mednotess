@@ -17,7 +17,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
-import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode } from "./editor/extensions";
+import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
 import { uploadFile } from "@/lib/upload";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
 
@@ -137,6 +137,9 @@ export default function Editor({
   const [sheet, setSheet] = useState<null | "format" | "insert">(null);
   const [slash, setSlash] = useState<null | { query: string; top: number; left: number }>(null);
   const [slashIndex, setSlashIndex] = useState(0);
+  const [linkBox, setLinkBox] = useState(false);
+  const [linkValue, setLinkValue] = useState("");
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const slashRef = useRef(slash);
   slashRef.current = slash;
@@ -148,6 +151,7 @@ export default function Editor({
     ...BLOCKS,
     { label: "Imagem", keywords: "imagem foto figura", run: () => imageInput.current?.click() },
     { label: "PDF", keywords: "pdf arquivo anexo", run: () => pdfInput.current?.click() },
+    { label: "Site", keywords: "site link url pagina web incorporar embed", run: () => { setLinkValue(""); setLinkError(null); setLinkBox(true); } },
   ];
   const filtered = (q: string) => {
     const t = q.trim().toLowerCase();
@@ -209,6 +213,7 @@ export default function Editor({
       Callout,
       Toggle,
       FileCard,
+      WebEmbed,
       TrailingNode,
     ],
     content: initial,
@@ -286,6 +291,24 @@ export default function Editor({
       setMessage(null);
     } catch {
       setMessage("Não foi possível enviar o arquivo. Confira se rodou o schema2.sql no Supabase.");
+    }
+  }
+
+  function insertSite() {
+    if (!editor) return;
+    let raw = linkValue.trim();
+    if (!raw) return;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `https://${raw}`;
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("protocolo");
+      if (!u.hostname.includes(".")) throw new Error("host");
+      editor.chain().focus().insertContent({ type: "webEmbed", attrs: { url: u.toString(), title: "" } }).run();
+      setLinkBox(false);
+      setLinkValue("");
+      setLinkError(null);
+    } catch {
+      setLinkError("Esse endereço não parece válido. Exemplo: https://www.gov.br/anvisa");
     }
   }
 
@@ -482,6 +505,28 @@ export default function Editor({
             <button type="button" aria-label="Fechar teclado" onClick={() => editor.commands.blur()}>⌄</button>
           </div>
         </>
+      )}
+
+      {linkBox && (
+        <div className="sheet link-box" onMouseDown={(e) => e.stopPropagation()}>
+          <label className="link-box-label" htmlFor="site-url">Endereço do site</label>
+          <input
+            id="site-url"
+            className="link-box-input"
+            type="url"
+            inputMode="url"
+            autoFocus
+            placeholder="https://…"
+            value={linkValue}
+            onChange={(e) => { setLinkValue(e.target.value); setLinkError(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); insertSite(); } if (e.key === "Escape") setLinkBox(false); }}
+          />
+          {linkError && <p className="link-box-error">{linkError}</p>}
+          <div className="sheet-row">
+            <button type="button" className="chip on" onClick={insertSite}>Incorporar</button>
+            <button type="button" className="chip" onClick={() => setLinkBox(false)}>Cancelar</button>
+          </div>
+        </div>
       )}
 
       <input ref={imageInput} type="file" accept="image/*" hidden onChange={(e) => { send(e.target.files?.[0], "image"); e.target.value = ""; }} />

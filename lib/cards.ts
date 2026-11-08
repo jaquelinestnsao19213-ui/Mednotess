@@ -7,6 +7,9 @@ export type AssistantCard = {
   explanation?: string;
   options?: string[]; // só nas questões
   correctIndex?: number; // só nas questões
+  optionNotes?: string[]; // só nas questões: por que cada alternativa está certa ou errada
+  topic?: string; // assunto (usado para agrupar o desempenho)
+  concept?: string; // conceito-chave que precisa ser compreendido
 };
 
 const clip = (value: unknown, max: number) => (typeof value === "string" ? value.trim().slice(0, max) : "");
@@ -19,19 +22,23 @@ export function sanitizeCards(raw: unknown, limit = 30): AssistantCard[] {
     if (out.length >= limit) break;
     if (!item || typeof item !== "object") continue;
     const c = item as Record<string, unknown>;
-    const question = clip(c.question ?? c.front, 800);
+    const question = clip(c.question ?? c.front, 1800);
     if (!question) continue;
     const explanation = clip(c.explanation, 1500) || undefined;
+    const topic = clip(c.topic, 120) || undefined;
+    const concept = clip(c.concept, 300) || undefined;
 
     if (c.type === "question" || Array.isArray(c.options)) {
       const options = Array.isArray(c.options) ? c.options.slice(0, 6).map((option) => clip(option, 400)) : [];
       const index = typeof c.correctIndex === "number" ? Math.trunc(c.correctIndex) : -1;
       if (options.length < 2 || options.some((option) => !option) || index < 0 || index >= options.length) continue;
-      out.push({ type: "question", question, answer: options[index], explanation, options, correctIndex: index });
+      const rawNotes = Array.isArray(c.optionNotes) ? c.optionNotes.slice(0, options.length).map((note) => clip(note, 500)) : [];
+      const optionNotes = rawNotes.length === options.length && rawNotes.some(Boolean) ? rawNotes : undefined;
+      out.push({ type: "question", question, answer: options[index], explanation, options, correctIndex: index, optionNotes, topic, concept });
     } else {
       const answer = clip(c.answer ?? c.back, 1200);
       if (!answer) continue;
-      out.push({ type: "flashcard", question, answer, explanation });
+      out.push({ type: "flashcard", question, answer, explanation, topic, concept });
     }
   }
   return out;

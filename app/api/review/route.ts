@@ -5,12 +5,12 @@ import { docPdfUrls, docToText, toDoc } from "@/lib/doc";
 import { type AiPlan, type Difficulty, topicKey, weakFocusFromAnswers } from "@/lib/review-report";
 import { HttpError, batchNote, describeAiError, generateCards, logError, parseModelObject, textOf } from "@/lib/server/review-ai";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const MODEL = "claude-sonnet-5-5";
 // A Vercel derruba a função em maxDuration e devolve texto puro ("An error occurred..."), que o navegador não consegue ler como JSON.
 // Por isso a IA tem um prazo interno menor: se estourar, respondemos nós mesmos, em JSON, com uma mensagem clara.
-const AI_DEADLINE_MS = Number(process.env.REVIEW_AI_DEADLINE_MS) || 50_000;
+const AI_DEADLINE_MS = Number(process.env.REVIEW_AI_DEADLINE_MS) || 110_000;
 const MAX_BODY_BYTES = 200_000;
 const MAX_PAGES = 8;
 const MAX_TEXT_PER_PAGE = 20_000;
