@@ -65,6 +65,9 @@ export type StudyCard = {
   explanation: string | null;
   options: string[] | null;
   correct_index: number | null;
+  topic: string | null;
+  concept: string | null;
+  option_notes: string[] | null;
   due_at: string;
   interval_days: number;
   ease: number;
