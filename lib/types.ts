@@ -62,8 +62,31 @@ export type Flashcard = {
   interval: number;
   ease_factor: number;
   repetitions: number;
-  /** Data de revisão no formato YYYY-MM-DD. */
   next_review: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ReviewMaterialType = "flashcard" | "question";
+
+export type ReviewMaterial = {
+  type: ReviewMaterialType;
+  title: string;
+  front: string;
+  back: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+};
+
+export type StudyReviewItem = ReviewMaterial & {
+  id: string;
+  user_id: string;
+  page_id: string | null;
+  page_title: string;
+  status: "new" | "review";
+  last_reviewed_at: string | null;
+  next_review_at: string;
   created_at: string;
   updated_at: string;
 };
