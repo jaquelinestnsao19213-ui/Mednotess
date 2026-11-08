@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Check, ChevronRight, Clock, FileText, ListChecks, Pencil, Plus, Trash2 } from "lucide-react";
-import HomeChat from "@/components/HomeChat";
+import HomeChat, { type OpenTaskRequest } from "@/components/HomeChat";
 import NotesEditor from "@/components/NotesEditor";
 import StepsEditor, { type FormStep } from "@/components/StepsEditor";
 import TaskDetail from "@/components/TaskDetail";
@@ -66,6 +66,7 @@ export default function WeeklyPlanningPage() {
   const [stepsMissing, setStepsMissing] = useState(false);
   const [formSteps, setFormSteps] = useState<FormStep[]>([]);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [pendingDetail, setPendingDetail] = useState<string | null>(null);
 
   const start = useMemo(() => {
     const date = weekStart(fromDateKey(toDateKey(new Date())));
@@ -118,6 +119,25 @@ export default function WeeklyPlanningPage() {
   }
 
   useEffect(() => { void load(); /* refresh when navigating weeks */ }, [weekOffset]);
+
+  /** Vai até o dia da atividade (mesmo em outra semana) e abre os detalhes assim que ela carregar. */
+  function goToTask({ id, date }: OpenTaskRequest) {
+    setWeekOffset(Math.round((weekStart(fromDateKey(date)).getTime() - weekStart(new Date()).getTime()) / (7 * 24 * 60 * 60 * 1000)));
+    setSelectedDate(date);
+    setPendingDetail(id);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  useEffect(() => {
+    if (pendingDetail && tasks.some((task) => task.id === pendingDetail)) { setDetailId(pendingDetail); setPendingDetail(null); }
+  }, [tasks, pendingDetail]);
+  // link vindo da assistente da tela inicial: /planejamento?date=AAAA-MM-DD&task=id
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const date = params.get("date");
+    const id = params.get("task");
+    if (date && /^\d{4}-\d{2}-\d{2}$/.test(date) && id) goToTask({ id, date });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function startCreate() {
     setEditingId(null);
@@ -240,7 +260,7 @@ export default function WeeklyPlanningPage() {
           {task.topic && <p className="task-note">{task.topic}</p>}
           <div className="task-meta">
             <span className="task-time"><Clock size={12} aria-hidden /> {task.time_label}</span>
-            <span className="task-subject"><i aria-hidden />{subject?.icon ? `${subject.icon} ` : ""}{subject?.name ?? "Disciplina removida"}</span>
+            <span className="task-subject"><i aria-hidden />{subject?.icon ? `${subject.icon} ` : ""}{subject?.name ?? (task.subject_id ? "Disciplina removida" : "Sem disciplina")}</span>
             {stepTotal > 0 && <span className="task-steps-chip"><ListChecks size={12} aria-hidden /> {stepDone}/{stepTotal}</span>}
             {task.notes?.trim() && <span className="task-steps-chip" title="Tem notas"><FileText size={12} aria-hidden /> Notas</span>}
           </div>
@@ -319,7 +339,7 @@ export default function WeeklyPlanningPage() {
         )}
       </section>
       {detailTask && <TaskDetail task={detailTask} subject={subjectById.get(detailTask.subject_id ?? "")} steps={stepsByTask.get(detailTask.id) ?? []} dateLabel={longDate(detailTask.scheduled_date)} onClose={() => setDetailId(null)} onToggleTask={(task) => void toggleTask(task)} onToggleStep={(step) => void toggleStep(step)} onEdit={startEdit} onDelete={(task) => void deleteTask(task)} />}
-      <HomeChat scope="planner" onChanged={() => void load()} />
+      <HomeChat scope="planner" onChanged={() => void load()} onOpenTask={goToTask} />
 
       <p className="planner-footnote">Seu planejamento é privado e salvo na sua conta. <a href="/disciplinas">Gerenciar disciplinas</a></p>
     </div>

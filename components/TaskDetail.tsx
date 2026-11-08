@@ -43,7 +43,7 @@ export default function TaskDetail({ task, subject, steps, dateLabel, onClose, o
       <div className="task-dialog" role="dialog" aria-modal="true" aria-labelledby="task-dialog-title" tabIndex={-1} ref={dialog} style={{ ["--task-color" as string]: subject?.color ?? "#64748b" }}>
         <header className="task-dialog-head">
           <div>
-            <span className="task-subject"><i aria-hidden />{subject?.icon ? `${subject.icon} ` : ""}{subject?.name ?? "Disciplina removida"}</span>
+            <span className="task-subject"><i aria-hidden />{subject?.icon ? `${subject.icon} ` : ""}{subject?.name ?? (task.subject_id ? "Disciplina removida" : "Sem disciplina")}</span>
             <h2 id="task-dialog-title">{task.title}</h2>
             {task.topic && <p className="task-note">{task.topic}</p>}
           </div>

@@ -30,13 +30,23 @@ export const db = {
   study_cards: cards.map(({ user, ...row }) => ({ due_at: new Date().toISOString(), interval_days: 0, ease: 2.5, reps: 0, lapses: 0, last_reviewed_at: null, created_at: new Date().toISOString(), source_title: "Farmacologia geral", kind: "flashcard", question: "Cartão antigo?", answer: "Sim", explanation: null, options: null, correct_index: null, topic: "Farmacocinética", concept: null, option_notes: null, ...row, user_id: user })),
   review_attempts: [],
   review_answers: [],
+  chat_conversations: [],
+  chat_messages: [],
+  subjects: [{ id: "bbbbbbbb-0000-4000-8000-000000000001", user_id: own, name: "Farmacologia", position: 0, notebook_page_id: null }],
+  study_tasks: [],
+  study_task_steps: [],
 };
-const DEFAULTS = { study_cards: () => ({ due_at: new Date().toISOString(), interval_days: 0, ease: 2.5, reps: 0, lapses: 0, last_reviewed_at: null, source_title: "" }), review_attempts: () => ({ name: "", kind: "original" }), review_answers: () => ({}) };
+// interruptores para simular um banco sem o schema12.sql (campo de notas e tabela de etapas)
+export const flags = { noNotes: false, noSteps: false, noActions: false };
+const DEFAULTS = { chat_conversations: () => ({ title: "Nova conversa", scope: "home", updated_at: new Date().toISOString() }), chat_messages: () => ({ attachments: null, actions: null }), study_tasks: () => ({ completed: false, notes: null, topic: null, subject_id: null }), study_task_steps: () => ({ completed: false, position: 0 }), study_cards: () => ({ due_at: new Date().toISOString(), interval_days: 0, ease: 2.5, reps: 0, lapses: 0, last_reviewed_at: null, source_title: "" }), review_attempts: () => ({ name: "", kind: "original" }), review_answers: () => ({}) };
 const RESERVED = new Set(["select", "order", "limit", "offset", "columns"]);
 const matches = (row, params) => [...params.entries()].every(([col, expr]) => {
   if (RESERVED.has(col)) return true;
   if (expr.startsWith("eq.")) return String(row[col]) === expr.slice(3);
   if (expr.startsWith("in.(")) return expr.slice(4, -1).split(",").includes(String(row[col]));
+  if (expr.startsWith("gte.")) return String(row[col]) >= expr.slice(4);
+  if (expr.startsWith("lte.")) return String(row[col]) <= expr.slice(4);
+  if (expr === "is.null") return row[col] === null || row[col] === undefined;
   return true;
 });
 const project = (row, select) => {
@@ -48,6 +58,16 @@ const project = (row, select) => {
 function rest(req, res, user, url, bodyText) {
   const table = url.pathname.replace("/rest/v1/", "");
   const rows = db[table];
+  if (table === "study_task_steps" && flags.noSteps) return json(res, 404, { code: "PGRST205", message: "Could not find the table 'public.study_task_steps' in the schema cache" });
+  if (table === "study_tasks" && flags.noNotes) {
+    const asksNotes = (url.searchParams.get("select") ?? "").split(",").includes("notes");
+    if (asksNotes) return json(res, 400, { code: "42703", message: "column study_tasks.notes does not exist" });
+    if (req.method === "POST" || req.method === "PATCH") { if (bodyText.includes('"notes"')) return json(res, 400, { code: "PGRST204", message: "Could not find the 'notes' column of 'study_tasks' in the schema cache" }); }
+  }
+  if (table === "chat_messages" && flags.noActions) {
+    if ((url.searchParams.get("select") ?? "").split(",").includes("actions")) return json(res, 400, { code: "42703", message: "column chat_messages.actions does not exist" });
+    if (req.method === "POST" && bodyText.includes('"actions"')) return json(res, 400, { code: "PGRST204", message: "Could not find the 'actions' column of 'chat_messages' in the schema cache" });
+  }
   if (!rows) return json(res, 404, { code: "PGRST205", message: `Could not find the table 'public.${table}'` });
   const select = url.searchParams.get("select");
   const single = (req.headers.accept ?? "").includes("vnd.pgrst.object");
@@ -56,7 +76,7 @@ function rest(req, res, user, url, bodyText) {
   if (req.method === "GET") {
     let list = mine();
     const order = url.searchParams.get("order");
-    if (order) { const [col, dir] = order.split("."); list = [...list].sort((x, y) => (String(x[col]) < String(y[col]) ? -1 : 1) * (dir === "desc" ? -1 : 1)); }
+    if (order) { const [col, dir] = order.split("."); list = [...list].sort((x, y) => (String(x[col]) === String(y[col]) ? 0 : String(x[col]) < String(y[col]) ? -1 : 1) * (dir === "desc" ? -1 : 1)); }
     const limit = Number(url.searchParams.get("limit")); if (limit) list = list.slice(0, limit);
     return out(list.map((r) => project(r, select)));
   }
@@ -66,12 +86,70 @@ function rest(req, res, user, url, bodyText) {
     rows.push(...created);
     return (req.headers.prefer ?? "").includes("return=representation") ? out(created.map((r) => project(r, select))) : (res.writeHead(201), res.end());
   }
-  if (req.method === "PATCH") { const list = mine(); const patch = JSON.parse(bodyText); list.forEach((r) => Object.assign(r, patch)); res.writeHead(204); return res.end(); }
-  if (req.method === "DELETE") { for (const r of mine()) rows.splice(rows.indexOf(r), 1); res.writeHead(204); return res.end(); }
+  if (req.method === "PATCH") {
+    const list = mine(); const patch = JSON.parse(bodyText); list.forEach((r) => Object.assign(r, patch));
+    if ((req.headers.prefer ?? "").includes("return=representation")) return out(list.map((r) => project(r, select)));
+    res.writeHead(204); return res.end();
+  }
+  if (req.method === "DELETE") {
+    const list = mine(); for (const r of list) rows.splice(rows.indexOf(r), 1);
+    if ((req.headers.prefer ?? "").includes("return=representation")) return out(list.map((r) => project(r, select)));
+    res.writeHead(204); return res.end();
+  }
   return json(res, 405, {});
 }
 
 export const anthropicRequests = [];
+
+/* ---------- IA simulada do agente de planejamento (cenários escolhidos por marcadores na 1ª mensagem) ---------- */
+const textBlocks = (content) => (Array.isArray(content) ? content.filter((b) => b.type === "text").map((b) => b.text).join("\n") : String(content ?? ""));
+const message = (res, content, stop = "end_turn") => json(res, 200, { id: "msg_a", type: "message", role: "assistant", model: "x", content, stop_reason: stop, stop_sequence: null, usage: { input_tokens: 100, output_tokens: 50 } });
+const toolUse = (name, input, n) => ({ type: "tool_use", id: `toolu_${name}_${n}`, name, input });
+const NOTES = "Primeiro parágrafo sobre COX-1 e COX-2.\n\nSegundo parágrafo sobre efeitos adversos.\n\n- item um\n- item dois";
+const STEPS = ["Revisar COX-1 e COX-2", "Estudar os AINEs", "Comparar com os corticoides", "Resolver questões"];
+const quatroBase = { title: "Farmacologia dos anti-inflamatórios", date: "2026-11-09", time_label: "Manhã", subject_name: "Farmacologia", notes: NOTES, steps: STEPS };
+
+async function agent(res, body) {
+  const msgs = body.messages;
+  const isToolResult = (m) => m.role === "user" && Array.isArray(m.content) && m.content.some((b) => b.type === "tool_result");
+  // o cenário vem da ÚLTIMA mensagem real da usuária (a conversa pode ter várias)
+  let lastReal = -1;
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user" && !isToolResult(msgs[i])) { lastReal = i; break; }
+  const first = textBlocks(msgs[lastReal].content);
+  const last = msgs[msgs.length - 1];
+  const lastText = textBlocks(last.content);
+  const results = msgs.slice(lastReal + 1).filter(isToolResult);
+  const step = results.length;
+  const overview = () => { const r = results[0]?.content?.find((b) => b.type === "tool_result"); try { return JSON.parse(r.content); } catch { return null; } };
+  const has = (m) => first.includes(m);
+  const tag = first.match(/\[\[(\w+)\]\]/)?.[1] ?? "PADRAO";
+  const quatro = { ...quatroBase, title: tag === "QUATRO" || tag === "DUPLICADA" ? quatroBase.title : `Farmacologia ${tag}` };
+
+  if (has("[[ERRO401]]")) return json(res, 401, { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } });
+  if (has("[[LENTA]]")) { await new Promise((r) => setTimeout(r, 4000)); return message(res, [{ type: "text", text: "tarde demais" }]); }
+  if (has("[[NADA]]")) return message(res, []);
+  if (has("[[CORTADO]]")) {
+    if (!lastText.includes("cortada por tamanho") && step === 0) return message(res, [], "max_tokens");
+    if (step === 0) return message(res, [toolUse("add_study_tasks", { tasks: [{ ...quatro, title: "Lote menor", notes: "curta", steps: ["a", "b"] }] }, 1)], "tool_use");
+    return message(res, [{ type: "text", text: "Criei em lote menor." }]);
+  }
+  if (has("[[ATUALIZAR]]")) {
+    if (step === 0) return message(res, [toolUse("get_overview", {}, 0)], "tool_use");
+    if (step === 1) { const t = overview()?.atividades?.[0]; return message(res, [toolUse("update_study_task", { id: t.id, notes: "Notas novas\n\ncom dois parágrafos", steps: [STEPS[0], "Etapa nova"] }, 1)], "tool_use"); }
+    return message(res, [{ type: "text", text: "Atualizei a atividade." }]);
+  }
+  if (has("[[LOTE]]")) { // 3 atividades, uma com data inválida
+    if (step === 0) return message(res, [toolUse("add_study_tasks", { tasks: [{ title: "A", date: "2026-11-10", time_label: "08:00" }, { title: "B", date: "segunda", time_label: "08:00" }, { title: "C", date: "2026-11-11", time_label: "Tarde", subject_name: "Inexistente" }] }, 1)], "tool_use");
+    return message(res, [{ type: "text", text: "Feito." }]);
+  }
+  // cenários que criam a atividade das 4 etapas
+  if (step === 0) return message(res, [toolUse("get_overview", {}, 0)], "tool_use");
+  if (step === 1) return message(res, [toolUse("add_study_tasks", { tasks: [quatro] }, 1)], "tool_use");
+  if (has("[[SEMTEXTO_TOTAL]]")) return message(res, []);
+  if (has("[[SEMTEXTO_APOS]]")) return body.tool_choice?.type === "none" ? message(res, [{ type: "text", text: "Resumo pedido à IA." }]) : message(res, []);
+  return message(res, [{ type: "text", text: "Criei a atividade com notas e 4 etapas." }]);
+}
+
 
 export function start() {
   const supa = http.createServer((req, res) => {
@@ -79,6 +157,7 @@ export function start() {
     const url = new URL(req.url, SUPA);
     if (req.method === "OPTIONS") { res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*" }); return res.end(); }
     res.setHeader("access-control-allow-origin", "*");
+    if (url.pathname === "/__flag") { for (const [k, v] of url.searchParams) flags[k] = v === "1"; return json(res, 200, flags); }
     if (url.pathname === "/auth/v1/user") return user ? json(res, 200, { id: user, aud: "authenticated", email: "x@y.z" }) : json(res, 401, { msg: "invalid" });
     if (!user) return json(res, 401, { message: "JWT" });
     let body = "";
@@ -93,6 +172,7 @@ export function start() {
     req.on("end", async () => {
       const body = JSON.parse(raw || "{}");
       anthropicRequests.push(body);
+      if (body.tools) return agent(res, body);
       const content = body.messages?.[0]?.content;
       const text = Array.isArray(content) ? content.filter((b) => b.type === "text").map((b) => b.text).join("\n") : String(content ?? "");
       if (text.includes("Página: SLOW")) { await new Promise((r) => setTimeout(r, 4000)); }

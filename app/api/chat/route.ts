@@ -2,8 +2,11 @@ import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { sanitizeCards, type AssistantCard } from "@/lib/cards";
+import { addDays, describeChatError, isDate, mondayOf, runAgent, weekdayOf, type ToolContext } from "@/lib/server/chat-agent";
 
-export const maxDuration = 60;
+export const maxDuration = 120;
+// prazo total da requisição (IA + ferramentas); precisa ser menor que maxDuration para respondermos em JSON antes da Vercel cortar
+const DEADLINE_MS = Number(process.env.CHAT_DEADLINE_MS) || 105_000;
 
 type Attachment = { url: string; kind: "image" | "pdf"; name: string };
 type ChatMessage = { role: "user" | "assistant"; content: string; attachments: Attachment[] };
@@ -15,7 +18,6 @@ const MAX_TOTAL_LENGTH = 450_000;
 const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const MAX_MESSAGES_WITH_FILES = 2; // só as 2 últimas mensagens com anexo reenviam o arquivo à IA
 const MAX_PAGE_CONTEXT = 24_000;
-const MAX_TOOL_ROUNDS = 5;
 const MODEL = "claude-sonnet-5-5";
 
 /* ---------- SYSTEM PROMPT DA MARIA - ESPECIALIZADA EM MEDICINA ---------- */
@@ -33,232 +35,13 @@ Diretrizes de Resposta:
 
 Nunca forneça respostas superficiais ou infantilizadas. Trate a estudante como uma futura médica de excelência.`;
 
-function jsonError(message: string, status: number) {
-  return NextResponse.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
+const newRef = () => Math.random().toString(36).slice(2, 8);
+let currentRef = "";
+function jsonError(message: string, status: number, step?: string) {
+  return NextResponse.json({ error: message, ref: currentRef || undefined, step }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-/* ---------- utilidades ---------- */
-
-const norm = (value: string) =>
-  value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-const isDate = (value: unknown): value is string =>
-  typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const WEEKDAYS = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
-
-function addDays(dateKey: string, days: number) {
-  const [y, m, d] = dateKey.split("-").map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d + days));
-  return date.toISOString().slice(0, 10);
-}
-function weekdayOf(dateKey: string) {
-  const [y, m, d] = dateKey.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-}
-function mondayOf(dateKey: string) {
-  return addDays(dateKey, -((weekdayOf(dateKey) + 6) % 7));
-}
-
-/** Acha um item pelo nome (ignora acentos/maiúsculas). Retorna o item, ou uma lista se for ambíguo. */
-function findByName<T>(items: T[], getName: (item: T) => string, wanted: string): { item?: T; candidates: T[] } {
-  const target = norm(wanted);
-  const exact = items.filter((item) => norm(getName(item)) === target);
-  if (exact.length === 1) return { item: exact[0], candidates: exact };
-  const partial = exact.length ? exact : items.filter((item) => norm(getName(item)).includes(target) || target.includes(norm(getName(item))));
-  if (partial.length === 1) return { item: partial[0], candidates: partial };
-  return { candidates: partial };
-}
-
-/* ---------- ferramentas que a assistente pode usar ---------- */
-
-const TOOLS: Anthropic.Tool[] = [
-  {
-    name: "get_overview",
-    description:
-      "Lê as disciplinas, os cadernos e as atividades do planejamento do usuário. Use SEMPRE antes de adicionar atividades ou mover cadernos, para conhecer os nomes exatos. Sem datas, devolve a semana atual.",
-    input_schema: {
-      type: "object",
-      properties: {
-        from: { type: "string", description: "Data inicial YYYY-MM-DD (opcional)" },
-        to: { type: "string", description: "Data final YYYY-MM-DD (opcional)" },
-      },
-    },
-  },
-  {
-    name: "add_study_tasks",
-    description:
-      "Adiciona uma ou várias atividades ao planejamento semanal. Use para inserir o planejamento que o usuário enviar.",
-    input_schema: {
-      type: "object",
-      properties: {
-        tasks: {
-          type: "array",
-          maxItems: 40,
-          items: {
-            type: "object",
-            properties: {
-              title: { type: "string", description: "O que será feito" },
-              date: { type: "string", description: "Dia no formato YYYY-MM-DD" },
-              time_label: { type: "string", description: "Horário (ex.: 08:00 ou 08:00–10:00) ou período (Manhã, Tarde, Noite)" },
-              subject_name: { type: "string", description: "Nome da disciplina, igual ao de get_overview (opcional)" },
-              topic: { type: "string", description: "Assunto (opcional)" },
-            },
-            required: ["title", "date", "time_label"],
-          },
-        },
-      },
-      required: ["tasks"],
-    },
-  },
-  {
-    name: "update_study_task",
-    description: "Altera uma atividade existente (use o id que veio de get_overview).",
-    input_schema: {
-      type: "object",
-      properties: {
-        id: { type: "string" },
-        title: { type: "string" },
-        date: { type: "string", description: "YYYY-MM-DD" },
-        time_label: { type: "string" },
-        topic: { type: "string" },
-        subject_name: { type: "string" },
-        completed: { type: "boolean" },
-      },
-      required: ["id"],
-    },
-  },
-  {
-    name: "delete_study_tasks",
-    description: "Exclui atividades pelo id. Só use quando o usuário pedir claramente para excluir/remover.",
-    input_schema: {
-      type: "object",
-      properties: { ids: { type: "array", items: { type: "string" }, maxItems: 40 } },
-      required: ["ids"],
-    },
-  },
-  {
-    name: "move_notebook_to_subject",
-    description:
-      "Coloca um caderno dentro de uma disciplina, tornando-o o caderno dessa disciplina. O caderno que estava antes na disciplina NÃO é apagado: continua em Cadernos.",
-    input_schema: {
-      type: "object",
-      properties: {
-        notebook_title: { type: "string", description: "Título do caderno, como em get_overview" },
-        subject_name: { type: "string", description: "Nome da disciplina, como em get_overview" },
-      },
-      required: ["notebook_title", "subject_name"],
-    },
-  },
-];
-
-type ToolContext = { db: SupabaseClient; today: string; changed: boolean };
-
-async function runTool(name: string, input: Record<string, unknown>, ctx: ToolContext): Promise<string> {
-  const { db } = ctx;
-  try {
-    if (name === "get_overview") {
-      const monday = mondayOf(ctx.today);
-      const from = isDate(input.from) ? input.from : monday;
-      const to = isDate(input.to) ? input.to : addDays(monday, 6);
-      const [subjects, notebooks, tasks] = await Promise.all([
-        db.from("subjects").select("id,name,notebook_page_id").order("position"),
-        db.from("pages").select("id,title").eq("type", "notebook").is("parent_id", null).order("created_at"),
-        db.from("study_tasks").select("id,title,topic,time_label,scheduled_date,completed,subject_id").gte("scheduled_date", from).lte("scheduled_date", to).order("scheduled_date").order("time_label"),
-      ]);
-      if (subjects.error || notebooks.error || tasks.error) return "Erro ao ler os dados.";
-      const subjectName = new Map((subjects.data ?? []).map((s) => [s.id, s.name]));
-      const notebookTitle = new Map((notebooks.data ?? []).map((n) => [n.id, n.title]));
-      return JSON.stringify({
-        periodo: { from, to },
-        disciplinas: (subjects.data ?? []).map((s) => ({ nome: s.name, caderno_atual: s.notebook_page_id ? notebookTitle.get(s.notebook_page_id) ?? null : null })),
-        cadernos: (notebooks.data ?? []).map((n) => n.title),
-        atividades: (tasks.data ?? []).map((t) => ({
-          id: t.id, titulo: t.title, data: t.scheduled_date, horario: t.time_label,
-          disciplina: t.subject_id ? subjectName.get(t.subject_id) ?? null : null, assunto: t.topic, concluida: t.completed,
-        })),
-      });
-    }
-
-    if (name === "add_study_tasks") {
-      const raw = Array.isArray(input.tasks) ? input.tasks.slice(0, 40) : [];
-      const { data: subjects } = await db.from("subjects").select("id,name");
-      const list = (subjects ?? []) as { id: string; name: string }[];
-      const rows: Record<string, unknown>[] = [];
-      const semDisciplina: string[] = [];
-      for (const entry of raw) {
-        const t = entry as Record<string, unknown>;
-        const title = typeof t.title === "string" ? t.title.trim().slice(0, 140) : "";
-        const timeLabel = typeof t.time_label === "string" ? t.time_label.trim().slice(0, 40) : "";
-        if (!title || !timeLabel || !isDate(t.date)) continue;
-        let subjectId: string | null = null;
-        if (typeof t.subject_name === "string" && t.subject_name.trim()) {
-          const match = findByName(list, (s) => s.name, t.subject_name);
-          if (match.item) subjectId = match.item.id;
-          else semDisciplina.push(`${title} (disciplina "${t.subject_name}" não encontrada)`);
-        }
-        rows.push({ title, scheduled_date: t.date, time_label: timeLabel, subject_id: subjectId, topic: typeof t.topic === "string" && t.topic.trim() ? t.topic.trim().slice(0, 100) : null });
-      }
-      if (!rows.length) return "Nenhuma atividade válida para inserir (confira título, data e horário).";
-      const { error } = await db.from("study_tasks").insert(rows);
-      if (error) return "Erro ao salvar as atividades.";
-      ctx.changed = true;
-      return JSON.stringify({ inseridas: rows.length, sem_disciplina_vinculada: semDisciplina });
-    }
-
-    if (name === "update_study_task") {
-      if (typeof input.id !== "string") return "id inválido.";
-      const patch: Record<string, unknown> = {};
-      if (typeof input.title === "string" && input.title.trim()) patch.title = input.title.trim().slice(0, 140);
-      if (isDate(input.date)) patch.scheduled_date = input.date;
-      if (typeof input.time_label === "string" && input.time_label.trim()) patch.time_label = input.time_label.trim().slice(0, 40);
-      if (typeof input.topic === "string") patch.topic = input.topic.trim().slice(0, 100) || null;
-      if (typeof input.completed === "boolean") patch.completed = input.completed;
-      if (typeof input.subject_name === "string" && input.subject_name.trim()) {
-        const { data: subjects } = await db.from("subjects").select("id,name");
-        const match = findByName((subjects ?? []) as { id: string; name: string }[], (s) => s.name, input.subject_name);
-        if (!match.item) return `Disciplina "${input.subject_name}" não encontrada.`;
-        patch.subject_id = match.item.id;
-      }
-      if (!Object.keys(patch).length) return "Nada para alterar.";
-      const { data, error } = await db.from("study_tasks").update(patch).eq("id", input.id).select("id");
-      if (error) return "Erro ao alterar a atividade.";
-      if (!data?.length) return "Atividade não encontrada.";
-      ctx.changed = true;
-      return "Atividade alterada.";
-    }
-
-    if (name === "delete_study_tasks") {
-      const ids = Array.isArray(input.ids) ? input.ids.filter((id): id is string => typeof id === "string").slice(0, 40) : [];
-      if (!ids.length) return "Nenhum id informado.";
-      const { data, error } = await db.from("study_tasks").delete().in("id", ids).select("id");
-      if (error) return "Erro ao excluir.";
-      ctx.changed = true;
-      return `${data?.length ?? 0} atividade(s) excluída(s).`;
-    }
-
-    if (name === "move_notebook_to_subject") {
-      if (typeof input.notebook_title !== "string" || typeof input.subject_name !== "string") return "Parâmetros inválidos.";
-      const [notebooks, subjects] = await Promise.all([
-        db.from("pages").select("id,title").eq("type", "notebook").is("parent_id", null),
-        db.from("subjects").select("id,name,notebook_page_id"),
-      ]);
-      if (notebooks.error || subjects.error) return "Erro ao ler os dados.";
-      const nb = findByName((notebooks.data ?? []) as { id: string; title: string }[], (n) => n.title, input.notebook_title);
-      if (!nb.item) return nb.candidates.length ? `Mais de um caderno combina: ${nb.candidates.map((c) => c.title).join("; ")}. Peça para o usuário escolher.` : `Caderno "${input.notebook_title}" não encontrado.`;
-      const sj = findByName((subjects.data ?? []) as { id: string; name: string; notebook_page_id: string | null }[], (s) => s.name, input.subject_name);
-      if (!sj.item) return sj.candidates.length ? `Mais de uma disciplina combina: ${sj.candidates.map((c) => c.name).join("; ")}. Peça para o usuário escolher.` : `Disciplina "${input.subject_name}" não encontrada. Ela precisa ser criada em Disciplinas.`;
-      if (sj.item.notebook_page_id === nb.item.id) return "Esse caderno já é o caderno dessa disciplina.";
-      const previous = sj.item.notebook_page_id ? (notebooks.data ?? []).find((n) => n.id === sj.item!.notebook_page_id)?.title ?? null : null;
-      const { error } = await db.from("subjects").update({ notebook_page_id: nb.item.id }).eq("id", sj.item.id);
-      if (error) return "Erro ao mover o caderno.";
-      ctx.changed = true;
-      return JSON.stringify({ ok: true, caderno: nb.item.title, disciplina: sj.item.name, caderno_anterior_continua_em_Cadernos: previous });
-    }
-
-    return "Ferramenta desconhecida.";
-  } catch {
-    return "Erro inesperado ao executar a ação.";
-  }
-}
 
 /* ---------- resposta em JSON (modo "página") ---------- */
 
@@ -299,9 +82,14 @@ function readableFallback(raw: string) {
 /* ---------- rota ---------- */
 
 export async function POST(request: Request) {
+  const ref = newRef();
+  currentRef = ref;
+  const startedAt = Date.now();
+  // logs técnicos: só etapa, tempos, contagens e códigos de erro (nunca chaves, tokens nem o texto das conversas)
+  const log = (step: string, data: Record<string, unknown> = {}) => console.log(JSON.stringify({ scope: "chat", ref, ms: Date.now() - startedAt, ...data, step }));
   const authorization = request.headers.get("authorization") ?? "";
   const tokenMatch = authorization.match(/^Bearer\s+([^\s]+)$/i);
-  if (!tokenMatch) return jsonError("Faça login para usar a assistente.", 401);
+  if (!tokenMatch) { log("auth_missing"); return jsonError("Faça login para usar a assistente.", 401, "autenticacao"); }
   const token = tokenMatch[1];
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -314,7 +102,8 @@ export async function POST(request: Request) {
     global: { headers: { Authorization: `Bearer ${token}` } },
   });
   const { data: { user }, error: authError } = await db.auth.getUser(token);
-  if (authError || !user) return jsonError("Sessão inválida ou expirada. Entre novamente.", 401);
+  if (authError || !user) { log("auth_invalid", { status: authError?.status ?? null }); return jsonError("Sessão inválida ou expirada. Entre novamente.", 401, "autenticacao"); }
+  log("request_start");
 
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (contentLength > MAX_BODY_BYTES) return jsonError("A solicitação enviada é muito longa.", 413);
@@ -379,9 +168,9 @@ export async function POST(request: Request) {
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return jsonError("A assistente ainda não está configurada. Adicione ANTHROPIC_API_KEY ao ambiente do servidor.", 503);
+  if (!apiKey) { log("no_api_key"); return jsonError("A assistente ainda não está configurada. Adicione ANTHROPIC_API_KEY ao ambiente do servidor.", 503, "configuracao"); }
 
-  const anthropic = new Anthropic({ apiKey, timeout: 55_000, maxRetries: 1 });
+  const anthropic = new Anthropic({ apiKey, timeout: 95_000, maxRetries: 1 });
 
   try {
     /* ----- Modo página (editor): com o System Prompt de Medicina ----- */
@@ -402,28 +191,33 @@ export async function POST(request: Request) {
       return NextResponse.json(parsed ?? { message: readableFallback(rawAnswer), insertText: null, cards: null }, { headers: { "Cache-Control": "no-store" } });
     }
 
-    /* ----- Modo agente (tela inicial): com ferramentas e o system prompt de Medicina ----- */
+    /* ----- Modo agente (tela inicial e planejamento): ferramentas que alteram o planejamento de verdade ----- */
     const today = isDate(body?.today) ? body!.today : new Date().toISOString().slice(0, 10);
     const monday = mondayOf(today);
-    const ctx: ToolContext = { db, today, changed: false };
+    const ctx: ToolContext = { db, today, changed: false, actions: [], log };
     const plannerScope = body?.scope === "planner"
-      ? "\n\nVocê está dentro da tela de Planejamento semanal: foque em organizar a rotina de estudos dela (adicionar, mover, concluir e reorganizar atividades). Quando ela pedir para ver a semana ou perguntar o que falta, use get_overview."
+      ? "\n\nVocê está dentro da tela de Planejamento semanal: foque em organizar a rotina de estudos dela (criar, mover, concluir e reorganizar atividades). Quando ela pedir para ver a semana ou perguntar o que falta, use get_overview."
       : "";
     const system = `${MARIA_MEDICINE_SYSTEM_PROMPT}
 
 Além disso, você age no app da usuária por meio de ferramentas de planejamento. Responda em português brasileiro, de forma cordial, estruturada e precisa.
 
-Hoje é ${WEEKDAYS[weekdayOf(today)]}, ${today}. A semana atual vai de segunda ${monday} a domingo ${addDays(monday, 6)}. Converta dias da semana em datas reais (YYYY-MM-DD) com base nisso; "esta semana" = a semana atual, "próxima semana" = a seguinte.
+Hoje é ${WEEKDAYS[weekdayOf(today)]}, ${today}. A semana atual vai de segunda ${monday} a domingo ${addDays(monday, 6)}. Converta dias da semana em datas reais (YYYY-MM-DD) com base nisso; "esta semana" = a semana atual, "próxima semana" = a seguinte. Se ela não disser o dia, use hoje.
 
 Regras de Ação:
-- Quando a usuária enviar ou descrever um planejamento, chame get_overview para ver os nomes das disciplinas e depois add_study_tasks com TODAS as atividades de uma vez. Use time_label como "08:00" ou "08:00–10:00" (ou Manhã/Tarde/Noite se não houver horário). Relacione cada atividade à disciplina certa quando existir. Não invente atividades que ela não citou.
+- Você EXECUTA as mudanças com as ferramentas; nunca apenas descreva o que faria. Para criar ou reorganizar atividades: chame get_overview (nomes exatos e para evitar duplicatas) e depois add_study_tasks.
+- Cada atividade tem: title (curto, até 140 caracteres), date, time_label ("08:00", "08:00–10:00" ou Manhã/Tarde/Noite se não houver horário), subject_name (se existir), topic (assunto curto), notes e steps.
+- notes é o lugar do texto longo: explicações, planejamento detalhado, perguntas para refletir, orientações. Escreva em Markdown simples, com parágrafos separados por linha em branco, listas e **negrito**. Nunca coloque texto longo em title ou topic.
+- steps é o checklist: cada item é uma etapa pequena, independente e executável, que começa com um verbo. Se ela pedir N etapas, crie exatamente N.
+- Quando ela enviar um texto longo (objetivos, prioridades, compromissos), leia tudo e monte a semana: distribua as atividades pelos dias, respeite compromissos e horários que ela citou e não invente atividades que ela não pediu. Crie no máximo 8 atividades por chamada de add_study_tasks e chame de novo se precisar de mais.
+- Se uma disciplina não existir, crie a atividade sem disciplina e avise em uma frase; não trave por isso. Se um dado essencial faltar de verdade, pergunte em uma frase.
+- Para alterar atividade existente (inclusive notas e etapas), use update_study_task com o id; se o resultado de add_study_tasks trouxer "ja_existiam", use update_study_task em vez de criar de novo.
+- Só diga que algo foi feito se o resultado da ferramenta trouxer "verificado" com ok verdadeiro. Se houver "avisos" ou ok falso, conte exatamente o que não foi salvo e o que ela pode fazer. Se a ferramenta devolver erro, explique de forma simples.
 - Para mover caderno para disciplina, use get_overview e depois move_notebook_to_subject.
-- Só diga que algo foi feito se a ferramenta confirmou. Se a ferramenta devolver erro, explique de forma simples e diga o que ela pode fazer.
-- Se faltar uma informação essencial (por exemplo, a disciplina não existe), diga o que falta em uma frase em vez de adivinhar.
-- Depois de agir, resuma em poucas linhas o que foi feito (ex.: "Adicionei 6 atividades de segunda a sexta"), sem repetir tudo. Ela pode editar ou concluir as atividades na tela de Planejamento semanal.
 - Excluir só quando ela pedir claramente.
-- Formate as respostas de forma bonita e organizada em Markdown: **negrito** para o que importa, títulos curtos com ## quando a resposta for longa, listas com hífen ou numeradas, e tabelas simples quando ajudar (por exemplo, um resumo da semana por dia). Sem exagero: respostas densas e bem fundamentadas cientificamente.
-- Se ela enviar foto ou PDF (um cronograma, artigos médicos, exames, flashcards ou anotações), leia o conteúdo detalhadamente e use-o como contexto para responder.${plannerScope}`;
+- Depois de agir, resuma em poucas linhas o que foi feito, sem repetir o conteúdo das notas.
+- Formate as respostas em Markdown: **negrito** para o que importa, listas com hífen ou numeradas, tabelas simples quando ajudar. Respostas densas e bem fundamentadas cientificamente.
+- Se ela enviar foto ou PDF (um cronograma, artigos médicos, exames, flashcards ou anotações), leia o conteúdo detalhadamente e use-o como contexto.${plannerScope}`;
 
     // só as últimas mensagens com anexo reenviam o arquivo; nas anteriores fica apenas o nome
     const withFiles = new Set<number>();
@@ -443,32 +237,40 @@ Regras de Ação:
       blocks.push({ type: "text", text: m.content });
       return { role: m.role, content: blocks };
     });
-    let finalText = "";
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await anthropic.messages.create({ model: MODEL, max_tokens: 6_000, system, tools: TOOLS, messages: convo });
-      const text = response.content
-        .filter((block): block is Anthropic.TextBlock => block.type === "text")
-        .map((block) => block.text)
-        .join("\n")
-        .trim();
-      const toolUses = response.content.filter((block): block is Anthropic.ToolUseBlock => block.type === "tool_use");
-      if (response.stop_reason !== "tool_use" || !toolUses.length) {
-        finalText = text;
-        break;
-      }
-      convo.push({ role: "assistant", content: response.content });
-      const results: Anthropic.ToolResultBlockParam[] = [];
-      for (const use of toolUses) {
-        const output = await runTool(use.name, (use.input ?? {}) as Record<string, unknown>, ctx);
-        results.push({ type: "tool_result", tool_use_id: use.id, content: output });
-      }
-      convo.push({ role: "user", content: results });
-      finalText = text;
+    log("agent_start", { messages: messages.length, chars: totalLength, files: messages.reduce((n, m) => n + m.attachments.length, 0) });
+
+    const signal = AbortSignal.timeout(DEADLINE_MS);
+    let outcome: Awaited<ReturnType<typeof runAgent>> | null = null;
+    let agentError: unknown = null;
+    try {
+      outcome = await runAgent({ anthropic, model: MODEL, system, convo, ctx, signal });
+    } catch (error) {
+      agentError = error;
     }
-    if (!finalText) finalText = ctx.changed ? "Pronto! Fiz as alterações." : "Não consegui concluir agora. Tente novamente.";
-    return NextResponse.json({ message: finalText, insertText: null, changed: ctx.changed }, { headers: { "Cache-Control": "no-store" } });
+
+    if (agentError) {
+      const info = describeChatError(agentError);
+      const e = agentError as { name?: string; status?: number; requestID?: string | null; message?: string };
+      log("agent_failed", { reason: info.step, error_type: e?.name, http_status: e?.status ?? null, request_id: e?.requestID ?? null, changed: ctx.changed, saved: ctx.actions.length });
+      if (ctx.changed) {
+        // parte do trabalho já foi gravada e conferida: não escondemos isso atrás de um erro genérico
+        const saved = ctx.actions.length ? `\n\nO que já ficou salvo e conferido:\n${[...new Map(ctx.actions.map((a) => [a.id, a])).values()].map((a) => `- ${a.title} (${a.date})`).join("\n")}` : "";
+        return NextResponse.json({ message: `${info.message}${saved}\n\nPeça para eu continuar de onde parei.`, insertText: null, changed: true, actions: ctx.actions, ref, partial: true }, { headers: { "Cache-Control": "no-store" } });
+      }
+      return jsonError(info.message, info.status, info.step);
+    }
+
+    const final = outcome!;
+    if (!final.text.trim()) {
+      log("empty_final", { rounds: final.rounds, changed: ctx.changed });
+      return jsonError("A IA terminou sem responder e nada foi alterado no planejamento. Tente reformular o pedido ou enviar em partes menores.", 502, "sem_resposta");
+    }
+    log("done", { rounds: final.rounds, truncated_retries: final.truncatedRetries, changed: ctx.changed, actions: ctx.actions.length });
+    return NextResponse.json({ message: final.text, insertText: null, changed: ctx.changed, actions: ctx.actions, ref }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    console.error("Anthropic chat request failed", error instanceof Error ? error.name : "unknown error");
-    return jsonError("Não foi possível obter uma resposta agora. Tente novamente em instantes.", 502);
+    const info = describeChatError(error);
+    const e = error as { name?: string; status?: number; requestID?: string | null };
+    log("page_mode_failed", { reason: info.step, error_type: e?.name, http_status: e?.status ?? null, request_id: e?.requestID ?? null });
+    return jsonError(info.message, info.status, info.step);
   }
 }
