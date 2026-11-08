@@ -54,39 +54,22 @@ export type ResourceLink = {
   updated_at: string;
 };
 
-export type Flashcard = {
-  id: string;
-  user_id: string;
-  front: string;
-  back: string;
-  interval: number;
-  ease_factor: number;
-  repetitions: number;
-  next_review: string;
-  created_at: string;
-  updated_at: string;
-};
-
-export type ReviewMaterialType = "flashcard" | "question";
-
-export type ReviewMaterial = {
-  type: ReviewMaterialType;
-  title: string;
-  front: string;
-  back: string;
-  options: string[];
-  correct_answer: string;
-  explanation: string;
-};
-
-export type StudyReviewItem = ReviewMaterial & {
+export type StudyCard = {
   id: string;
   user_id: string;
   page_id: string | null;
-  page_title: string;
-  status: "new" | "review";
+  source_title: string;
+  kind: "flashcard" | "question";
+  question: string;
+  answer: string;
+  explanation: string | null;
+  options: string[] | null;
+  correct_index: number | null;
+  due_at: string;
+  interval_days: number;
+  ease: number;
+  reps: number;
+  lapses: number;
   last_reviewed_at: string | null;
-  next_review_at: string;
   created_at: string;
-  updated_at: string;
 };
