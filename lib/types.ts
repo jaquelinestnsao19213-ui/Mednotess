@@ -40,6 +40,17 @@ export type StudyTask = {
   time_label: string;
   scheduled_date: string;
   completed: boolean;
+  notes?: string | null; // só existe depois de executar o schema12.sql
+  created_at: string;
+};
+
+export type StudyTaskStep = {
+  id: string;
+  task_id: string;
+  user_id: string;
+  text: string;
+  completed: boolean;
+  position: number;
   created_at: string;
 };
 
