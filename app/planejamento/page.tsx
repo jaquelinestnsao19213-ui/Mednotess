@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { Check, ChevronRight, Clock, Pencil, Plus, Trash2 } from "lucide-react";
 import HomeChat from "@/components/HomeChat";
 import type { StudyTask, Subject } from "@/lib/types";
 
@@ -50,6 +51,7 @@ export default function WeeklyPlanningPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [doneOpen, setDoneOpen] = useState(false);
 
   const start = useMemo(() => {
     const date = weekStart(fromDateKey(toDateKey(new Date())));
@@ -64,6 +66,8 @@ export default function WeeklyPlanningPage() {
   const subjectById = useMemo(() => new Map(subjects.map((subject) => [subject.id, subject])), [subjects]);
   const weekTasks = useMemo(() => tasks.filter((task) => dates.includes(task.scheduled_date)), [tasks, dates]);
   const dayTasks = useMemo(() => weekTasks.filter((task) => task.scheduled_date === selectedDate).sort((a, b) => a.time_label.localeCompare(b.time_label)), [weekTasks, selectedDate]);
+  const pendingTasks = useMemo(() => dayTasks.filter((task) => !task.completed), [dayTasks]);
+  const doneTasks = useMemo(() => dayTasks.filter((task) => task.completed), [dayTasks]);
   const completedCount = weekTasks.filter((task) => task.completed).length;
   const progress = weekTasks.length ? Math.round((completedCount / weekTasks.length) * 100) : 0;
 
@@ -133,9 +137,14 @@ export default function WeeklyPlanningPage() {
     setSaving(false);
   }
   async function toggleTask(task: StudyTask) {
-    const { error: updateError } = await supabase.from("study_tasks").update({ completed: !task.completed }).eq("id", task.id);
-    if (updateError) setError("Não foi possível atualizar o progresso.");
-    else setTasks((current) => current.map((item) => item.id === task.id ? { ...item, completed: !item.completed } : item));
+    const next = !task.completed;
+    // a tarefa muda de lista na hora; se o salvamento falhar, voltamos ao estado anterior
+    setTasks((current) => current.map((item) => item.id === task.id ? { ...item, completed: next } : item));
+    const { error: updateError } = await supabase.from("study_tasks").update({ completed: next }).eq("id", task.id);
+    if (updateError) {
+      setTasks((current) => current.map((item) => item.id === task.id ? { ...item, completed: task.completed } : item));
+      setError("Não foi possível atualizar o progresso.");
+    }
   }
   async function deleteTask(task: StudyTask) {
     if (!window.confirm(`Excluir a atividade “${task.title}”?`)) return;
@@ -147,11 +156,33 @@ export default function WeeklyPlanningPage() {
     }
   }
 
+  function renderTask(task: StudyTask) {
+    const subject = subjectById.get(task.subject_id ?? "");
+    const color = subject?.color ?? "#64748b";
+    return (
+      <article className={`study-task${task.completed ? " completed" : ""}`} key={task.id} style={{ ["--task-color" as string]: color }}>
+        <button type="button" className="task-check" aria-label={task.completed ? `Marcar ${task.title} como pendente` : `Concluir ${task.title}`} aria-pressed={task.completed} onClick={() => void toggleTask(task)}>{task.completed && <Check size={14} strokeWidth={3} aria-hidden />}</button>
+        <div className="task-body">
+          <h3>{task.title}</h3>
+          {task.topic && <p className="task-note">{task.topic}</p>}
+          <div className="task-meta">
+            <span className="task-time"><Clock size={12} aria-hidden /> {task.time_label}</span>
+            <span className="task-subject"><i aria-hidden />{subject?.icon ? `${subject.icon} ` : ""}{subject?.name ?? "Disciplina removida"}</span>
+          </div>
+        </div>
+        <div className="task-actions">
+          <button type="button" aria-label={`Editar ${task.title}`} title="Editar" onClick={() => startEdit(task)}><Pencil size={15} aria-hidden /></button>
+          <button type="button" className="danger" aria-label={`Excluir ${task.title}`} title="Excluir" onClick={() => void deleteTask(task)}><Trash2 size={15} aria-hidden /></button>
+        </div>
+      </article>
+    );
+  }
+
   return (
     <div className="planner-page">
       <section className="planner-hero">
         <div><span className="eyebrow">UM PLANO QUE CABE NA SUA ROTINA</span><h1 className="display">Planejamento semanal</h1><p>Organize seus estudos com leveza. Cada pequena tarefa concluída conta.</p></div>
-        <button className="planner-add-button" type="button" onClick={startCreate}><span aria-hidden>＋</span> Nova atividade</button>
+        <button className="planner-add-button" type="button" onClick={startCreate}><Plus size={16} aria-hidden /> Nova atividade</button>
       </section>
 
       <section className="planner-progress-card" aria-label="Progresso semanal">
@@ -166,7 +197,7 @@ export default function WeeklyPlanningPage() {
           {dates.map((date, index) => {
             const dateTasks = weekTasks.filter((task) => task.scheduled_date === date);
             const isToday = date === toDateKey(new Date());
-            return <button type="button" key={date} className={`week-day${date === selectedDate ? " selected" : ""}${isToday ? " today" : ""}`} aria-pressed={date === selectedDate} onClick={() => { setSelectedDate(date); if (showForm && !editingId) setForm((current) => ({ ...current, scheduled_date: date })); }}><span>{DAY_SHORT[index]}</span><strong>{fromDateKey(date).getDate()}</strong><small>{dateTasks.length ? `${dateTasks.length} ${dateTasks.length === 1 ? "atividade" : "atividades"}` : "Livre"}</small></button>;
+            return <button type="button" key={date} className={`week-day${date === selectedDate ? " selected" : ""}${isToday ? " today" : ""}`} aria-pressed={date === selectedDate} onClick={() => { setSelectedDate(date); if (showForm && !editingId) setForm((current) => ({ ...current, scheduled_date: date })); }}><span>{DAY_SHORT[index]}</span><strong>{fromDateKey(date).getDate()}</strong><small>{!dateTasks.length ? "Livre" : dateTasks.every((task) => task.completed) ? "Tudo feito" : `${dateTasks.filter((task) => !task.completed).length} pendente${dateTasks.filter((task) => !task.completed).length === 1 ? "" : "s"}`}</small></button>;
           })}
         </div>
       </section>
@@ -190,18 +221,24 @@ export default function WeeklyPlanningPage() {
       )}
 
       <section className="day-plan" aria-live="polite">
-        <div className="day-plan-heading"><div><span className="eyebrow">SEU DIA DE ESTUDO</span><h2>{DAY_NAMES[(fromDateKey(selectedDate).getDay() + 6) % 7]} <span>{fromDateKey(selectedDate).getDate()} de {new Intl.DateTimeFormat("pt-BR", { month: "long" }).format(fromDateKey(selectedDate))}</span></h2></div><button type="button" className="add-inline-button" onClick={startCreate}>＋ <span>Adicionar</span></button></div>
-        {loading ? <p className="muted">Carregando atividades…</p> : dayTasks.length ? (
-          <div className="task-list">{dayTasks.map((task) => {
-            const subject = subjectById.get(task.subject_id ?? "");
-            return <article className={`study-task${task.completed ? " completed" : ""}`} key={task.id}>
-              <button type="button" className="task-check" aria-label={task.completed ? `Marcar ${task.title} como pendente` : `Concluir ${task.title}`} aria-pressed={task.completed} onClick={() => void toggleTask(task)}>{task.completed ? "✓" : ""}</button>
-              <time className="task-time">{task.time_label}</time>
-              <div className="task-details"><div className="task-tags"><span className="task-subject" style={{ ["--task-color" as string]: subject?.color ?? "#64748b" }}>{subject?.icon || "✳"} {subject?.name ?? "Disciplina removida"}</span>{task.topic && <span className="task-topic">{task.topic}</span>}</div><h3>{task.title}</h3>{task.completed && <span className="completed-label">Concluída</span>}</div>
-              <div className="task-actions"><button type="button" aria-label={`Editar ${task.title}`} onClick={() => startEdit(task)}>Editar</button><button type="button" aria-label={`Excluir ${task.title}`} onClick={() => void deleteTask(task)}>Excluir</button></div>
-            </article>;
-          })}</div>
-        ) : <div className="day-empty"><span aria-hidden="true">✦</span><div><strong>Um espaço em branco também faz parte do plano.</strong><p>Adicione uma tarefa de estudo para este dia quando quiser.</p></div><button type="button" className="secondary" onClick={startCreate}>＋ Adicionar atividade</button></div>}
+        <div className="day-plan-heading"><div><span className="eyebrow">SEU DIA DE ESTUDO</span><h2>{DAY_NAMES[(fromDateKey(selectedDate).getDay() + 6) % 7]} <span>{fromDateKey(selectedDate).getDate()} de {new Intl.DateTimeFormat("pt-BR", { month: "long" }).format(fromDateKey(selectedDate))}</span></h2></div><button type="button" className="add-inline-button" onClick={startCreate}><Plus size={16} aria-hidden /> <span>Adicionar</span></button></div>
+        {loading ? <p className="muted">Carregando atividades…</p> : (
+          <>
+            {pendingTasks.length ? (
+              <div className="task-list">{pendingTasks.map((task) => renderTask(task))}</div>
+            ) : dayTasks.length ? (
+              <div className="day-empty day-empty-done"><span aria-hidden="true"><Check size={20} /></span><div><strong>Tudo feito por hoje.</strong><p>Todas as atividades deste dia estão concluídas. Bom trabalho!</p></div></div>
+            ) : (
+              <div className="day-empty"><span aria-hidden="true">✦</span><div><strong>Um espaço em branco também faz parte do plano.</strong><p>Adicione uma tarefa de estudo para este dia quando quiser.</p></div><button type="button" className="secondary" onClick={startCreate}><Plus size={14} aria-hidden /> Adicionar atividade</button></div>
+            )}
+            {doneTasks.length > 0 && (
+              <div className={`done-section${doneOpen ? " open" : ""}`}>
+                <button type="button" className="done-toggle" aria-expanded={doneOpen} onClick={() => setDoneOpen((open) => !open)}><ChevronRight size={16} aria-hidden /><span>Tarefas concluídas</span><em>{doneTasks.length}</em></button>
+                {doneOpen && <div className="task-list">{doneTasks.map((task) => renderTask(task))}</div>}
+              </div>
+            )}
+          </>
+        )}
       </section>
       <HomeChat scope="planner" onChanged={() => void load()} />
 
