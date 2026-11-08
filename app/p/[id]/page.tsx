@@ -57,14 +57,47 @@ function PageView({ id }: { id: string }) {
     save(patch);
   }
 
+  // Converte o texto da assistente (títulos ##, listas, **negrito**) em blocos do editor.
+  function inlineNodes(text: string): JSONContent[] {
+    const nodes: JSONContent[] = [];
+    text.split(/(\*\*[^*]+\*\*)/g).forEach((part) => {
+      if (!part) return;
+      if (part.startsWith("**") && part.endsWith("**") && part.length > 4) nodes.push({ type: "text", text: part.slice(2, -2), marks: [{ type: "bold" }] });
+      else nodes.push({ type: "text", text: part });
+    });
+    return nodes;
+  }
+
   function insertAssistantText(text: string) {
     if (!page) return;
     const doc = toDoc(page.content);
-    const paragraphs: JSONContent[] = text.split(/\n+/).map((line) => ({
-      type: "paragraph",
-      content: line.trim() ? [{ type: "text", text: line.trim() }] : [],
-    }));
-    const content = [...(doc.content ?? []), ...paragraphs];
+    const blocks: JSONContent[] = [];
+    let list: { type: "bulletList" | "orderedList"; items: JSONContent[] } | null = null;
+    const flush = () => {
+      if (list) blocks.push({ type: list.type, content: list.items });
+      list = null;
+    };
+    for (const raw of text.split(/\n/)) {
+      const line = raw.trim();
+      if (!line) { flush(); continue; }
+      const heading = line.match(/^(#{1,4})\s+(.*)$/);
+      const bullet = line.match(/^[-*•]\s+(.*)$/);
+      const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+      if (heading) {
+        flush();
+        blocks.push({ type: "heading", attrs: { level: Math.min(3, Math.max(2, heading[1].length)) }, content: inlineNodes(heading[2]) });
+      } else if (bullet || numbered) {
+        const kind = bullet ? "bulletList" : "orderedList";
+        if (list && list.type !== kind) flush();
+        if (!list) list = { type: kind, items: [] };
+        list.items.push({ type: "listItem", content: [{ type: "paragraph", content: inlineNodes((bullet ?? numbered)![1]) }] });
+      } else {
+        flush();
+        blocks.push({ type: "paragraph", content: inlineNodes(line) });
+      }
+    }
+    flush();
+    const content = [...(doc.content ?? []), { type: "horizontalRule" }, ...blocks];
     const next = { ...doc, content };
     setPage((current) => current ? { ...current, content: next } : current);
     save({ content: next });
@@ -290,7 +323,7 @@ function PageView({ id }: { id: string }) {
       )}
 
       {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
-      <PageAssistant title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
+      <PageAssistant pageId={id} title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
       <button className="danger" onClick={remove}>Excluir página</button>
     </>
   );
