@@ -24,11 +24,21 @@ export default function Dashboard() {
   const [notebooks, setNotebooks] = useState<PageRow[]>([]);
   const [tasks, setTasks] = useState<StudyTask[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [dueCount, setDueCount] = useState<number | null>(null);
 
   useEffect(() => {
     const weekStart = mondayOf(new Date());
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekEnd.getDate() + 6);
+
+    // quantos itens de Revisões estão prontos (ignora erro: a tabela pode ainda não existir)
+    void supabase
+      .from("study_cards")
+      .select("id", { count: "exact", head: true })
+      .lte("due_at", new Date().toISOString())
+      .then(({ count, error: countError }) => {
+        if (!countError) setDueCount(count ?? 0);
+      });
 
     (async () => {
       const [subjectResult, notebookResult, taskResult] = await Promise.all([
@@ -124,6 +134,22 @@ export default function Dashboard() {
             <span>Transforme seus objetivos em uma rotina possível.</span>
             <span className="workspace-link">
               Planejar estudos <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+
+          <Link href="/revisoes" className="workspace-card workspace-review">
+            <span className="workspace-icon" aria-hidden="true">🧠</span>
+            <span className="workspace-label">MEMÓRIA</span>
+            <strong>Revisões</strong>
+            <span>
+              {dueCount === null
+                ? "Flashcards e questões criados a partir das suas páginas."
+                : dueCount > 0
+                  ? `${dueCount} ${dueCount === 1 ? "item pronto" : "itens prontos"} para revisar agora.`
+                  : "Flashcards e questões criados a partir das suas páginas."}
+            </span>
+            <span className="workspace-link">
+              Abrir revisões <b aria-hidden="true">↗</b>
             </span>
           </Link>
 
