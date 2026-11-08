@@ -53,3 +53,23 @@ export type ResourceLink = {
   created_at: string;
   updated_at: string;
 };
+
+export type StudyCard = {
+  id: string;
+  user_id: string;
+  page_id: string | null;
+  source_title: string;
+  kind: "flashcard" | "question";
+  question: string;
+  answer: string;
+  explanation: string | null;
+  options: string[] | null;
+  correct_index: number | null;
+  due_at: string;
+  interval_days: number;
+  ease: number;
+  reps: number;
+  lapses: number;
+  last_reviewed_at: string | null;
+  created_at: string;
+};
