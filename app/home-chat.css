@@ -50,6 +50,12 @@
 .ac-loading span { font-size: .85rem; }
 @keyframes ac-bounce { to { opacity: .35; transform: translateY(-3px); } }
 
+/* copiar mensagem */
+.ac-msg-tools { display: flex; justify-content: flex-end; margin-top: 6px; }
+.ac-copy { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: .76rem; opacity: .7; transition: opacity .15s ease, background .15s ease; }
+.ac-copy:hover, .ac-copy:focus-visible, .ac-copy.is-ok { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); color: var(--accent); opacity: 1; }
+@media (hover: hover) { .ac-msg-tools { opacity: 0; transition: opacity .15s ease; } .ac-msg:hover .ac-msg-tools, .ac-msg-tools:focus-within { opacity: 1; } }
+
 /* cartões das tarefas criadas */
 .ac-cards { display: grid; gap: 10px; margin-top: 12px; }
 .ac-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }

@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, CalendarDays, Check, ChevronDown, ChevronUp, FileText, Image as ImageIcon, Maximize2, Menu, Minimize2, Paperclip, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUp, CalendarDays, Check, ChevronDown, ChevronUp, Copy, FileText, Image as ImageIcon, Maximize2, Menu, Minimize2, Paperclip, Pencil, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { ApiError, errorMessage, postJson } from "@/lib/api";
 import Markdown from "@/components/Markdown";
@@ -102,6 +102,38 @@ async function uploadToStorage(blob: Blob, ext: string, contentType: string) {
   const { error } = await supabase.storage.from("files").upload(path, blob, { contentType });
   if (error) throw new Error("Não foi possível enviar o arquivo. Tente novamente.");
   return supabase.storage.from("files").getPublicUrl(path).data.publicUrl;
+}
+
+/** Copia para a área de transferência (com plano B para navegadores que bloqueiam a API moderna). */
+async function copyText(text: string) {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* tenta o plano B */ }
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(area);
+    return ok;
+  } catch { return false; }
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
+  async function copy() {
+    setState((await copyText(text)) ? "ok" : "fail");
+    setTimeout(() => setState("idle"), 1800);
+  }
+  return (
+    <button type="button" className={`ac-copy${state === "ok" ? " is-ok" : ""}`} onClick={() => void copy()} aria-label="Copiar mensagem" title="Copiar mensagem">
+      {state === "ok" ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+      <span aria-live="polite">{state === "ok" ? "Copiado" : state === "fail" ? "Não foi possível copiar" : "Copiar"}</span>
+    </button>
+  );
 }
 
 /** Cartão de uma atividade que a assistente criou ou alterou (dados lidos de volta do banco). */
@@ -517,6 +549,7 @@ export default function HomeChat({ scope = "home", onChanged, onOpenTask }: { sc
                     ) : null}
                     {message.role === "assistant" ? <Markdown text={message.content} /> : <div className="ac-usertext">{message.content}</div>}
                     {message.actions?.length ? <div className="ac-cards">{message.actions.map((action) => <TaskActionCard key={`${action.id}-${action.type}`} action={action} onOpen={openTask} />)}</div> : null}
+                    <div className="ac-msg-tools"><CopyButton text={message.content} /></div>
                   </div>
                 </article>
               ))
