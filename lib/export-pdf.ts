@@ -1,4 +1,5 @@
 import type { Editor as TiptapEditor } from "@tiptap/core";
+import { normalizeStrokes, strokesToSvg } from "./image-strokes";
 
 const PRINT_STYLES = `
   @page { size: A4; margin: 18mm 19mm 20mm; }
@@ -93,7 +94,7 @@ const PRINT_STYLES = `
     break-inside: avoid;
   }
   .annotation .toggle-content { display: block !important; }
-  .annotation .toggle-btn, .annotation .img-handle { display: none !important; }
+  .annotation .toggle-btn, .annotation .img-handle, .annotation .img-toolbar { display: none !important; }
   .annotation .img-wrap, .annotation .img-box { max-width: 100%; }
   .annotation .file-card { color: #0f5f59; text-decoration: underline; }
   @media screen {
@@ -163,6 +164,25 @@ export function exportEditorAsPdf(editor: TiptapEditor, fallbackTitle = "Anotaç
       image.addEventListener("error", () => resolve(), { once: true });
     });
   }));
+  // Desenhos feitos sobre as imagens entram no PDF como camada em SVG por cima da foto.
+  const strokesReady = imagesReady.then(() => {
+    for (const image of images) {
+      const raw = image.getAttribute("data-strokes");
+      if (!raw || !image.naturalWidth || !image.naturalHeight) continue;
+      const list = normalizeStrokes(raw);
+      if (!list.length) continue;
+      const holder = printDocument.createElement("span");
+      holder.className = "img-with-strokes";
+      holder.style.cssText = `position:relative;display:inline-block;max-width:100%;${image.getAttribute("style") ?? ""}`;
+      const overlay = printDocument.createElement("img");
+      overlay.alt = "";
+      overlay.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(strokesToSvg(list, image.naturalWidth, image.naturalHeight))}`;
+      overlay.style.cssText = "position:absolute;inset:0;width:100%;height:100%;";
+      image.replaceWith(holder);
+      image.style.width = "100%";
+      holder.append(image, overlay);
+    }
+  });
   const fontsReady = printDocument.fonts?.ready ?? Promise.resolve();
   let printed = false;
   const print = () => {
@@ -172,7 +192,7 @@ export function exportEditorAsPdf(editor: TiptapEditor, fallbackTitle = "Anotaç
     printWindow.print();
   };
   printWindow.onafterprint = () => printWindow.close();
-  Promise.all([imagesReady, fontsReady]).then(print);
+  Promise.all([strokesReady, fontsReady]).then(print);
   // Do not leave a popup open indefinitely if a remote image never finishes loading.
   printWindow.setTimeout(print, 2500);
 

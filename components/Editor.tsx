@@ -18,7 +18,7 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
-import { uploadFile } from "@/lib/upload";
+import { fileExtension, uploadFile } from "@/lib/upload";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
@@ -146,10 +146,12 @@ export default function Editor({
   const indexRef = useRef(0);
   indexRef.current = slashIndex;
   const editorRef = useRef<TipEditor | null>(null);
+  const imagesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
 
   const allItems: Cmd[] = [
     ...BLOCKS,
     { label: "Imagem", keywords: "imagem foto figura", run: () => imageInput.current?.click() },
+    { label: "Colar imagem", keywords: "colar imagem foto copiar area transferencia print", run: () => { void pasteImageFromClipboard(); } },
     { label: "PDF", keywords: "pdf arquivo anexo", run: () => pdfInput.current?.click() },
     { label: "Site", keywords: "site link url pagina web incorporar embed", run: () => { setLinkValue(""); setLinkError(null); setLinkBox(true); } },
   ];
@@ -234,6 +236,13 @@ export default function Editor({
     editorProps: {
       attributes: { spellcheck: "true", "aria-label": "Página" },
       handlePaste: (view, event) => {
+        // Imagem copiada (print, galeria, outro app): envia e insere, sem precisar baixar antes.
+        const pasted = Array.from(event.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
+        if (pasted.length && !event.clipboardData?.getData("text/plain")?.trim()) {
+          event.preventDefault();
+          void imagesRef.current(pasted);
+          return true;
+        }
         const html = event.clipboardData?.getData("text/html");
         if (!html) return false;
 
@@ -246,6 +255,15 @@ export default function Editor({
 
         event.preventDefault();
         view.dispatch(view.state.tr.replaceSelection(slice).scrollIntoView());
+        return true;
+      },
+      handleDrop: (view, event, _slice, moved) => {
+        if (moved) return false; // arrastar blocos dentro da página continua normal
+        const dropped = Array.from(event.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+        if (!dropped.length) return false;
+        event.preventDefault();
+        const at = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
+        void imagesRef.current(dropped, at);
         return true;
       },
       handleKeyDown: (_view, ev) => {
@@ -280,6 +298,50 @@ export default function Editor({
       vv.removeEventListener("scroll", set);
     };
   }, []);
+
+  async function insertImages(files: File[], pos?: number) {
+    const e = editorRef.current;
+    if (!e || !files.length) return;
+    setMessage(files.length > 1 ? "Enviando imagens…" : "Enviando imagem…");
+    try {
+      let at = pos;
+      for (const file of files) {
+        const src = await uploadFile(file);
+        const node = { type: "image", attrs: { src } };
+        if (at === undefined) e.chain().focus().insertContent(node).run();
+        else {
+          e.chain().focus().insertContentAt(at, node).run();
+          at = undefined; // as próximas entram logo depois, onde o cursor ficou
+        }
+      }
+      setMessage(null);
+    } catch {
+      setMessage("Não foi possível enviar a imagem. Confira se rodou o schema2.sql no Supabase e se você está logada.");
+    }
+  }
+  imagesRef.current = insertImages;
+
+  // Botão "Colar imagem": lê a área de transferência (precisa de toque do usuário e HTTPS).
+  async function pasteImageFromClipboard() {
+    try {
+      if (!navigator.clipboard?.read) throw new Error("sem suporte");
+      const clips = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const clip of clips) {
+        const type = clip.types.find((t) => t.startsWith("image/"));
+        if (!type) continue;
+        const blob = await clip.getType(type);
+        files.push(new File([blob], `colada.${fileExtension({ type })}`, { type }));
+      }
+      if (!files.length) {
+        setMessage("Não achei nenhuma imagem copiada. Copie a imagem primeiro e toque em Colar imagem de novo.");
+        return;
+      }
+      await insertImages(files);
+    } catch {
+      setMessage("O navegador não liberou a área de transferência. Toque e segure na página e escolha Colar.");
+    }
+  }
 
   async function send(file: File | undefined, kind: "image" | "pdf") {
     if (!file || !editor) return;

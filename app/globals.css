@@ -167,6 +167,40 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .img-box img { display: block; width: 100%; height: auto; border-radius: 8px; }
 .img-handle { position: absolute; right: -8px; bottom: -8px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); border: 3px solid var(--bg); cursor: nwse-resize; touch-action: none; }
 .img-box:hover .img-handle, .img-wrap[data-selected="true"] .img-handle { opacity: 1; }
+.img-wrap[data-selected="true"] .img-box img { outline: 2px solid var(--accent); outline-offset: 2px; }
+.img-strokes { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; border-radius: 8px; }
+.img-toolbar { position: absolute; top: -50px; left: 0; z-index: 6; display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 20px rgb(0 0 0 / 0.18); }
+.img-toolbar.below { top: calc(100% + 12px); }
+.img-toolbar button, .img-grip { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 1.1rem; line-height: 1; }
+.img-toolbar button.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.img-toolbar button.danger { color: var(--danger); }
+.img-toolbar button:disabled { opacity: 0.3; }
+.img-grip { cursor: grab; touch-action: none; color: var(--muted); }
+
+.imgmod { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column; background: #101418; color: #fff; font-family: system-ui, sans-serif; }
+.imgmod button { color: inherit; font: inherit; }
+.imgmod-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; overflow: hidden; touch-action: none; }
+.imgmod-board { position: relative; display: inline-block; line-height: 0; transform-origin: center; }
+.imgmod-img { display: block; max-width: calc(100vw - 16px); max-height: calc(100dvh - 190px); user-select: none; -webkit-user-drag: none; }
+.imgmod-zoom .imgmod-img { max-height: 100dvh; max-width: 100vw; }
+.imgmod-zoom .imgmod-stage { padding: 0; }
+.imgmod-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+.imgmod-bar { display: flex; align-items: center; gap: 4px; padding: 8px 10px; padding-top: max(8px, env(safe-area-inset-top)); background: #1b2128; }
+.imgmod-bar button { min-width: 42px; height: 40px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; font-size: 1rem; }
+.imgmod-bar button:disabled { opacity: 0.3; }
+.imgmod-bar .imgmod-save { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.imgmod-spacer { flex: 1; }
+.imgmod-tools { padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: #1b2128; display: grid; gap: 8px; }
+.imgmod-row { display: flex; align-items: center; gap: 6px; overflow-x: auto; }
+.imgmod-row > button { flex: 0 0 auto; height: 38px; padding: 0 12px; border-radius: 8px; border: 1px solid #3a4452; background: transparent; }
+.imgmod-row > button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.imgmod-row .swatch { width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 2px solid #3a4452; }
+.imgmod-row .swatch.on { border-color: #fff; box-shadow: 0 0 0 2px var(--accent); }
+.imgmod-row .wid { width: 42px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.imgmod-row .wid span { display: block; width: 22px; border-radius: 99px; background: currentColor; }
+.imgmod-close { position: absolute; top: max(10px, env(safe-area-inset-top)); right: 10px; width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgb(0 0 0 / 0.6); font-size: 1.2rem; }
+.imgmod-zoombar { position: absolute; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgb(0 0 0 / 0.6); }
+.imgmod-zoombar button { min-width: 48px; height: 40px; border: 0; border-radius: 8px; background: transparent; font-size: 1.1rem; }
 .file-card { display: inline-block; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; text-decoration: none; background: var(--surface); font-family: system-ui, sans-serif; }
 
 .dock {

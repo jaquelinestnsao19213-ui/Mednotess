@@ -2,6 +2,7 @@ import { Extension, Node, mergeAttributes } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import Image from "@tiptap/extension-image";
 import { ReactNodeViewRenderer } from "@tiptap/react";
+import { normalizeStrokes } from "../../lib/image-strokes";
 import ImageView from "./ImageView";
 import PdfCardView from "./PdfCardView";
 import WebEmbedView from "./WebEmbedView";
@@ -55,6 +56,18 @@ export const ImageWithWidth = Image.extend({
         },
         renderHTML: (attrs: Record<string, unknown>) =>
           attrs.width ? { width: attrs.width, style: `width:${attrs.width}px;max-width:100%` } : {},
+      },
+      // Desenho feito por cima da imagem (coordenadas de 0 a 1). Guardado no bloco; a imagem original não muda.
+      strokes: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const list = normalizeStrokes(el.getAttribute("data-strokes"));
+          return list.length ? list : null;
+        },
+        renderHTML: (attrs: Record<string, unknown>) => {
+          const list = normalizeStrokes(attrs.strokes);
+          return list.length ? { "data-strokes": JSON.stringify(list) } : {};
+        },
       },
     };
   },
