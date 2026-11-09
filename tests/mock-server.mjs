@@ -35,6 +35,8 @@ export const db = {
   subjects: [{ id: "bbbbbbbb-0000-4000-8000-000000000001", user_id: own, name: "Farmacologia", position: 0, notebook_page_id: null }],
   study_tasks: [],
   study_task_steps: [],
+  topics: [],
+  topic_pages: [],
 };
 // interruptores para simular um banco sem o schema12.sql (campo de notas e tabela de etapas)
 export const flags = { noNotes: false, noSteps: false, noActions: false };

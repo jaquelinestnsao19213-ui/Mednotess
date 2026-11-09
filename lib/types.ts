@@ -87,3 +87,12 @@ export type StudyCard = {
   last_reviewed_at: string | null;
   created_at: string;
 };
+
+// Atalho de um assunto para uma página (de qualquer caderno). Existe depois de executar o schema15.sql.
+export type TopicLink = {
+  id: string;
+  topic_id: string;
+  page_id: string;
+  position: number;
+  created_at: string;
+};

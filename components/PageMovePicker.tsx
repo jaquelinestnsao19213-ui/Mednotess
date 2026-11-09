@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
 import { loadTreePages } from "@/lib/page-ops";
-import { TYPE_LABEL, bringCandidates, moveCandidates, searchCandidates, type Candidate, type TreePage } from "@/lib/page-tree";
+import { TYPE_LABEL, bringCandidates, linkCandidates, moveCandidates, searchCandidates, type Candidate, type TreePage } from "@/lib/page-tree";
 
 type Props =
   | { mode: "move"; moving: TreePage; onPick: (destinationId: string | null) => void; onClose: () => void }
-  | { mode: "bring"; targetId: string | null; targetTitle: string; onPick: (pageId: string) => void; onClose: () => void };
+  | { mode: "bring"; targetId: string | null; targetTitle: string; onPick: (pageId: string) => void; onClose: () => void }
+  | { mode: "pick"; title: string; hint: string; excludeIds?: string[]; onPick: (pageId: string) => void; onClose: () => void };
 
 /** Janela para escolher para onde mover uma página, ou qual página trazer para a tabela atual. */
 export default function PageMovePicker(props: Props) {
@@ -29,13 +30,13 @@ export default function PageMovePicker(props: Props) {
 
   const candidates = useMemo(() => {
     if (!pages) return [];
-    const all = props.mode === "move" ? moveCandidates(pages, props.moving) : bringCandidates(pages, props.targetId);
+    const all = props.mode === "move" ? moveCandidates(pages, props.moving) : props.mode === "bring" ? bringCandidates(pages, props.targetId) : linkCandidates(pages, props.excludeIds);
     return searchCandidates(all, query).slice(0, 300);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pages, query, props.mode]);
 
-  const title = props.mode === "move" ? `Mover "${props.moving.title || "Sem título"}" para…` : `Trazer para "${props.targetTitle}"`;
-  const hint = props.mode === "move" ? "Escolha o caderno, a aula ou a página de destino." : "Escolha a página que deve passar a ficar aqui, de qualquer nível.";
+  const title = props.mode === "move" ? `Mover "${props.moving.title || "Sem título"}" para…` : props.mode === "bring" ? `Trazer para "${props.targetTitle}"` : props.title;
+  const hint = props.mode === "move" ? "Escolha o caderno, a aula ou a página de destino." : props.mode === "bring" ? "Escolha a página que deve passar a ficar aqui, de qualquer nível." : props.hint;
 
   function pick(candidate: Candidate) {
     if (candidate.disabled) return;

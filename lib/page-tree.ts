@@ -71,6 +71,14 @@ export function bringCandidates(pages: TreePage[], targetId: string | null): Can
     .map((page) => ({ id: page.id, title: page.title || "Sem título", icon: page.icon, type: page.type, path: pathLabel(pages, page.id) }));
 }
 
+/** Qualquer página da conta (menos as de `excludeIds`), para vincular a um assunto. */
+export function linkCandidates(pages: TreePage[], excludeIds: string[] = []): Candidate[] {
+  const skip = new Set(excludeIds);
+  return pages
+    .filter((page) => !skip.has(page.id))
+    .map((page) => ({ id: page.id, title: page.title || "Sem título", icon: page.icon, type: page.type, path: pathLabel(pages, page.id) }));
+}
+
 export function searchCandidates(candidates: Candidate[], query: string): Candidate[] {
   const q = norm(query);
   if (!q) return candidates;
