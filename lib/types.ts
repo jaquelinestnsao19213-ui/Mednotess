@@ -29,6 +29,7 @@ export type Topic = {
   page_id: string | null;
   position: number;
   created_at: string;
+  parent_id?: string | null; // subassunto de outro assunto (existe depois do schema16.sql)
 };
 
 export type StudyTask = {

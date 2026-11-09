@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { LESSON_TEMPLATE } from "@/lib/doc";
 import type { Subject, Topic, TopicLink } from "@/lib/types";
@@ -10,7 +10,10 @@ import { ColorPicker, IconPicker } from "@/components/SubjectBits";
 import PageMovePicker from "@/components/PageMovePicker";
 import ImportToTopic, { NEW_TOPIC } from "@/components/ImportToTopic";
 import { loadTreePages, movePage } from "@/lib/page-ops";
-import { TYPE_LABEL, pathLabel, type TreePage } from "@/lib/page-tree";
+import { pathLabel, type TreePage } from "@/lib/page-tree";
+import TopicCard, { type PageItem } from "@/components/TopicCard";
+import TopicParentPicker from "@/components/TopicParentPicker";
+import { applyDrop, canNest, childrenOf, cleanParents, diffTopics, dropZone, moveTopic, nestTargets, shiftTopic, unnestTopic, type DropZone } from "@/lib/topic-tree";
 import { countLabel, topicPageIds, transferCheck, type ImportMode } from "@/lib/topic-links";
 
 type RootPage = { id: string; title: string };
@@ -35,13 +38,18 @@ function SubjectView({ id }: { id: string }) {
   const [chosen, setChosen] = useState<null | { pageId: string; topicId: string | null }>(null);
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [nesting, setNesting] = useState<Topic | null>(null);
+  const [drag, setDrag] = useState<null | { id: string; target: string | null; zone: DropZone | null }>(null);
+  const topicsRef = useRef<Topic[]>([]);
+  topicsRef.current = topics;
 
   async function load() {
     const { data: s } = await supabase.from("subjects").select("*").eq("id", id).maybeSingle();
     if (!s) return setNotFound(true);
     setSubject(s as Subject);
     const { data: t } = await supabase.from("topics").select("*").eq("subject_id", id).order("position").order("created_at");
-    setTopics((t ?? []) as Topic[]);
+    setTopics(cleanParents((t ?? []) as Topic[]));
 
     // páginas vinculadas a cada assunto (tabela do schema15.sql; sem ela, a tela funciona como antes)
     const topicIds = ((t ?? []) as Topic[]).map((x) => x.id);
@@ -87,7 +95,7 @@ function SubjectView({ id }: { id: string }) {
     if (!clean) return;
     const { data, error } = await supabase
       .from("topics")
-      .insert({ subject_id: id, name: clean, position: topics.length })
+      .insert({ subject_id: id, name: clean, position: childrenOf(topics, null).length })
       .select("*")
       .single();
     if (error || !data) return setError("Não foi possível criar o assunto.");
@@ -103,11 +111,95 @@ function SubjectView({ id }: { id: string }) {
     else setTopics((l) => l.map((x) => (x.id === t.id ? { ...x, name: clean } : x)));
   }
 
+  function askRename(t: Topic) {
+    const name = window.prompt("Novo nome do assunto:", t.name);
+    if (name !== null) renameTopic(t, name);
+  }
+
+  async function addSubtopic(parent: Topic) {
+    const name = window.prompt(`Nome do subassunto de "${parent.name}":`)?.trim();
+    if (!name) return;
+    setError(null);
+    const { data, error } = await supabase
+      .from("topics")
+      .insert({ subject_id: id, name, position: childrenOf(topics, parent.id).length, parent_id: parent.id })
+      .select("*")
+      .single();
+    if (error || !data) return setError("Não foi possível criar o subassunto. Confira se o schema16.sql foi executado no Supabase.");
+    setTopics((l) => [...l, data as Topic]);
+    setExpanded((s) => new Set(s).add(parent.id));
+  }
+
+  // Grava só o que mudou. Se algo falhar, recarrega a tela para não mostrar uma ordem que não foi salva.
+  async function persistMove(next: Topic[] | null) {
+    if (!next) return;
+    const changes = diffTopics(topicsRef.current, next);
+    if (!changes.length) return;
+    setTopics(next);
+    const results = await Promise.all(changes.map((c) => supabase.from("topics").update(c.patch).eq("id", c.id)));
+    if (results.some((r) => r.error)) {
+      setError("Não foi possível salvar a nova organização. Se usou subassuntos, confirme que o schema16.sql foi executado.");
+      await load();
+    }
+  }
+
+  const toggle = (tid: string) => setExpanded((s) => { const n = new Set(s); if (n.has(tid)) n.delete(tid); else n.add(tid); return n; });
+
+  // Arrastar pela alça ⠿: solta antes, depois ou dentro (meio do cartão) de outro assunto.
+  function gripDown(e: React.PointerEvent<HTMLElement>, t: Topic) {
+    e.preventDefault();
+    const el = e.currentTarget;
+    try { el.setPointerCapture(e.pointerId); } catch { /* sem suporte: segue sem captura */ }
+    let last: { id: string; target: string | null; zone: DropZone | null } = { id: t.id, target: null, zone: null };
+    let y = e.clientY;
+    setDrag(last);
+    const pick = () => {
+      const heads = Array.from(document.querySelectorAll<HTMLElement>("[data-topic-head]")).filter((h) => h.dataset.topicHead !== t.id);
+      let best: { id: string; top: number; bottom: number; dist: number } | null = null;
+      for (const h of heads) {
+        const r = h.getBoundingClientRect();
+        const dist = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+        if (!best || dist < best.dist) best = { id: h.dataset.topicHead!, top: r.top, bottom: r.bottom, dist };
+      }
+      if (!best) return;
+      const zone = dropZone(best.top, best.bottom, y);
+      const ok = applyDrop(topicsRef.current, t.id, best.id, zone) !== null;
+      last = { id: t.id, target: ok ? best.id : null, zone: ok ? zone : null };
+      setDrag(last);
+    };
+    const move = (ev: PointerEvent) => { y = ev.clientY; pick(); };
+    const scroller = window.setInterval(() => {
+      if (y < 80) window.scrollBy(0, -14);
+      else if (y > window.innerHeight - 80) window.scrollBy(0, 14);
+    }, 30);
+    const end = (ev: PointerEvent, cancelled: boolean) => {
+      window.clearInterval(scroller);
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", cancel);
+      if (!cancelled) {
+        y = ev.clientY;
+        pick();
+        if (last.target && last.zone) {
+          if (last.zone === "inside") setExpanded((s) => new Set(s).add(last.target!));
+          void persistMove(applyDrop(topicsRef.current, t.id, last.target, last.zone));
+        }
+      }
+      setDrag(null);
+    };
+    const up = (ev: PointerEvent) => end(ev, false);
+    const cancel = (ev: PointerEvent) => end(ev, true);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", cancel);
+  }
+
   async function removeTopic(t: Topic) {
     if (!window.confirm(`Excluir o assunto "${t.name}"? A página dele no caderno, se existir, continua no caderno.`)) return;
     const { error } = await supabase.from("topics").delete().eq("id", t.id);
     if (error) return setError("Não foi possível excluir o assunto.");
-    setTopics((l) => l.filter((x) => x.id !== t.id));
+    // subassuntos não são apagados: viram assuntos principais (o banco faz isso sozinho)
+    setTopics((l) => l.filter((x) => x.id !== t.id).map((x) => (x.parent_id === t.id ? { ...x, parent_id: null } : x)));
   }
 
   const linksOf = (t: Topic) => links.filter((l) => l.topic_id === t.id);
@@ -144,7 +236,7 @@ function SubjectView({ id }: { id: string }) {
       }
       let topic = topics.find((t) => t.id === choice) ?? null;
       if (choice === NEW_TOPIC) {
-        const { data, error } = await supabase.from("topics").insert({ subject_id: id, name: title, position: topics.length }).select("*").single();
+        const { data, error } = await supabase.from("topics").insert({ subject_id: id, name: title, position: childrenOf(topics, null).length }).select("*").single();
         if (error || !data) return setError("Não foi possível criar o assunto.");
         topic = data as Topic;
         setTopics((l) => [...l, data as Topic]);
@@ -211,6 +303,50 @@ function SubjectView({ id }: { id: string }) {
     router.push("/disciplinas");
   }
 
+  function renderTopic(t: Topic, isChild: boolean): React.ReactNode {
+    const ids = topicPageIds(t, linksOf(t));
+    const subs = childrenOf(topics, t.id);
+    const pages: PageItem[] = ids.map((pid) => {
+      const pg = treePages?.find((x) => x.id === pid);
+      return { id: pid, title: pg?.title ?? "", icon: pg?.icon ?? null, type: pg?.type ?? "page", path: treePages && pg ? pathLabel(treePages, pid) : "" };
+    });
+    const sibs = childrenOf(topics, t.parent_id ?? null);
+    const idx = sibs.findIndex((x) => x.id === t.id);
+    const subtitle = [countLabel(ids.length), subs.length ? `${subs.length} ${subs.length === 1 ? "subassunto" : "subassuntos"}` : ""].filter(Boolean).join(" · ");
+    const open = expanded.has(t.id);
+    return (
+      <TopicCard
+        key={t.id}
+        id={t.id}
+        name={t.name}
+        isChild={isChild}
+        subtitle={subtitle}
+        pages={pages}
+        expanded={open}
+        dragging={drag?.id === t.id}
+        drop={drag && drag.target === t.id ? drag.zone : null}
+        canUp={idx > 0}
+        canDown={idx >= 0 && idx < sibs.length - 1}
+        canNest={nestTargets(topics, t.id).length > 0}
+        // um conteúdo só e nenhum subassunto: toque abre direto no caderno; senão, abre/fecha o assunto
+        onHead={() => (ids.length === 1 && subs.length === 0 ? router.push(`/p/${ids[0]}`) : toggle(t.id))}
+        onToggle={() => toggle(t.id)}
+        onImport={() => setPicking({ topicId: t.id })}
+        onAddSub={() => addSubtopic(t)}
+        onRename={() => askRename(t)}
+        onUp={() => persistMove(shiftTopic(topics, t.id, -1))}
+        onDown={() => persistMove(shiftTopic(topics, t.id, 1))}
+        onNest={() => setNesting(t)}
+        onUnnest={() => persistMove(unnestTopic(topics, t.id))}
+        onDelete={() => removeTopic(t)}
+        onUnlink={(pid) => unlink(t, pid)}
+        onGrip={(e) => gripDown(e, t)}
+      >
+        {subs.length > 0 ? subs.map((c) => renderTopic(c, true)) : null}
+      </TopicCard>
+    );
+  }
+
   if (notFound) return <p className="empty">Disciplina não encontrada. <Link href="/disciplinas">Voltar às disciplinas</Link></p>;
   if (!subject) return <p className="muted">Carregando…</p>;
 
@@ -268,7 +404,7 @@ function SubjectView({ id }: { id: string }) {
       )}
 
       <section className="subpages">
-        <h2>Assuntos</h2>
+        <h2>Conteúdo da disciplina</h2>
         <form className="row topic-add" onSubmit={(e) => { e.preventDefault(); addTopic(); }}>
           <input value={newTopic} placeholder="Novo assunto" aria-label="Nome do novo assunto" onChange={(e) => setNewTopic(e.target.value)} />
           <button className="secondary" type="submit" disabled={!newTopic.trim()}>Adicionar</button>
@@ -277,53 +413,27 @@ function SubjectView({ id }: { id: string }) {
         {topics.length === 0 ? (
           <p className="empty">Nenhum assunto ainda. Adicione os temas desta disciplina.</p>
         ) : (
-          <ul className="topics topic-cards">
-            {topics.map((t) => {
-              const ids = topicPageIds(t, linksOf(t));
-              return (
-                <li key={t.id} className="topic-card">
-                  <div className="topic-line">
-                    <input defaultValue={t.name} aria-label="Nome do assunto" onBlur={(e) => renameTopic(t, e.target.value)} />
-                    {t.page_id ? (
-                      <Link className="open" href={`/p/${t.page_id}`}>Abrir página</Link>
-                    ) : (
-                      <button className="open" disabled={!subject.notebook_page_id} onClick={() => createTopicPage(t)}>Criar página</button>
-                    )}
-                    <button className="icon-del" aria-label={`Excluir assunto ${t.name}`} onClick={() => removeTopic(t)}>✕</button>
-                  </div>
-                  <p className="topic-meta">{countLabel(ids.length)}</p>
-                  {ids.length > 0 && (
-                    <details className="topic-related">
-                      <summary>Conteúdos relacionados</summary>
-                      <ul>
-                        {ids.map((pid) => {
-                          const page = treePages?.find((p) => p.id === pid);
-                          const where = treePages && page ? pathLabel(treePages, pid) : "";
-                          return (
-                            <li key={pid}>
-                              <Link href={`/p/${pid}`}>
-                                <span aria-hidden="true">{page?.icon || (page?.type === "notebook" ? "📓" : page?.type === "lesson" ? "📚" : "📄")}</span>
-                                <span className="tr-text"><strong>{page?.title || "Sem título"}</strong>{where && <small>{where}</small>}</span>
-                                {page && <span className="pm-tag">{TYPE_LABEL[page.type] ?? ""}</span>}
-                              </Link>
-                              <button type="button" className="tr-unlink" aria-label={`Tirar ${page?.title || "página"} do assunto ${t.name}`} onClick={() => unlink(t, pid)}>Desvincular</button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </details>
-                  )}
-                  <button type="button" className="secondary small" onClick={() => setPicking({ topicId: t.id })}>＋ Importar página</button>
-                </li>
-              );
-            })}
-          </ul>
+          <ul className="topics topic-tree">{childrenOf(topics, null).map((t) => renderTopic(t, false))}</ul>
         )}
 
         <div className="row topic-import">
           <button type="button" className="secondary" onClick={() => setPicking({ topicId: null })}>⤓ Importar de outro caderno</button>
         </div>
       </section>
+
+      {nesting && (
+        <TopicParentPicker
+          name={nesting.name}
+          options={nestTargets(topics, nesting.id)}
+          onClose={() => setNesting(null)}
+          onPick={(parentId) => {
+            const me = nesting;
+            setNesting(null);
+            setExpanded((x) => new Set(x).add(parentId));
+            void persistMove(moveTopic(topicsRef.current, me.id, parentId, childrenOf(topicsRef.current, parentId).length));
+          }}
+        />
+      )}
 
       {picking && (
         <PageMovePicker

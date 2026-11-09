@@ -57,6 +57,22 @@ export const ImageWithWidth = Image.extend({
         renderHTML: (attrs: Record<string, unknown>) =>
           attrs.width ? { width: attrs.width, style: `width:${attrs.width}px;max-width:100%` } : {},
       },
+      // Onde a imagem fica na linha: esquerda, centro ou direita.
+      align: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute("data-align");
+          return v === "left" || v === "center" || v === "right" ? v : null;
+        },
+        renderHTML: (attrs: Record<string, unknown>) =>
+          attrs.align === "center"
+            ? { "data-align": "center", style: "display:block;margin-left:auto;margin-right:auto" }
+            : attrs.align === "right"
+              ? { "data-align": "right", style: "display:block;margin-left:auto" }
+              : attrs.align === "left"
+                ? { "data-align": "left" }
+                : {},
+      },
       // Desenho feito por cima da imagem (coordenadas de 0 a 1). Guardado no bloco; a imagem original não muda.
       strokes: {
         default: null,

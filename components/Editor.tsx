@@ -19,6 +19,8 @@ import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
 import { fileExtension, uploadFile } from "@/lib/upload";
+import { Slice } from "@tiptap/pm/model";
+import { richClipboard } from "@/lib/copy-html";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
@@ -151,6 +153,7 @@ export default function Editor({
   const allItems: Cmd[] = [
     ...BLOCKS,
     { label: "Imagem", keywords: "imagem foto figura", run: () => imageInput.current?.click() },
+    { label: "Copiar página inteira", keywords: "copiar tudo pagina inteira google docs word formatacao", run: () => { void copyWholePage(); } },
     { label: "Colar imagem", keywords: "colar imagem foto copiar area transferencia print", run: () => { void pasteImageFromClipboard(); } },
     { label: "PDF", keywords: "pdf arquivo anexo", run: () => pdfInput.current?.click() },
     { label: "Site", keywords: "site link url pagina web incorporar embed", run: () => { setLinkValue(""); setLinkError(null); setLinkBox(true); } },
@@ -235,6 +238,22 @@ export default function Editor({
     },
     editorProps: {
       attributes: { spellcheck: "true", "aria-label": "Página" },
+      handleDOMEvents: {
+        // Ctrl+C / Copiar: leva o texto com a formatação embutida, para o Google Docs e outros apps respeitarem
+        copy: (view, event) => {
+          try {
+            const sel = view.state.selection;
+            if (sel.empty || !event.clipboardData) return false;
+            const { html, text } = richClipboard(view, sel.content());
+            event.clipboardData.setData("text/html", html);
+            event.clipboardData.setData("text/plain", text);
+            event.preventDefault();
+            return true;
+          } catch {
+            return false; // se algo falhar, vale a cópia normal do editor
+          }
+        },
+      },
       handlePaste: (view, event) => {
         // Imagem copiada (print, galeria, outro app): envia e insere, sem precisar baixar antes.
         const pasted = Array.from(event.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
@@ -320,6 +339,35 @@ export default function Editor({
     }
   }
   imagesRef.current = insertImages;
+
+  // Copia a página toda (texto, títulos, cores, listas, tabelas, avisos e imagens) pronta para colar em outro app.
+  async function copyWholePage() {
+    const e = editorRef.current;
+    if (!e) return;
+    const { html, text } = richClipboard(e.view, new Slice(e.state.doc.content, 0, 0));
+    let ok = false;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) })]);
+      ok = true;
+    } catch {
+      // navegador sem ClipboardItem: seleciona uma cópia invisível e usa o comando antigo de copiar
+      const holder = document.createElement("div");
+      holder.contentEditable = "true";
+      holder.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      holder.innerHTML = html;
+      document.body.append(holder);
+      const range = document.createRange();
+      range.selectNodeContents(holder);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      ok = document.execCommand("copy");
+      sel?.removeAllRanges();
+      holder.remove();
+    }
+    setMessage(ok ? "Página copiada com a formatação. Cole no Google Docs, Word ou outro app." : "Não foi possível copiar. Selecione o texto e use Copiar.");
+    if (ok) window.setTimeout(() => setMessage((m) => (m && m.startsWith("Página copiada") ? null : m)), 5000);
+  }
 
   // Botão "Colar imagem": lê a área de transferência (precisa de toque do usuário e HTTPS).
   async function pasteImageFromClipboard() {
