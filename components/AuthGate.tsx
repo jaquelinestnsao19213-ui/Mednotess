@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 import ResourceLibrary from "@/components/ResourceLibrary";
+import GlobalSearch from "@/components/GlobalSearch";
 
 const NAV = [
   { href: "/", label: "Início" },
@@ -39,6 +40,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
           Sair
         </button>
       </header>
+      <GlobalSearch />
       <nav className="mainnav" aria-label="Áreas do aplicativo">
         {NAV.map((n) => {
           const active = n.href === "/" ? pathname === "/" : pathname.startsWith(n.href);
