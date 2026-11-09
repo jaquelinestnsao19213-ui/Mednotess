@@ -10,6 +10,9 @@ import { uploadFile } from "@/lib/upload";
 import { LESSON_TEMPLATE, toDoc } from "@/lib/doc";
 import type { PageRow } from "@/lib/types";
 import PageAssistant from "@/components/PageAssistant";
+import SubpagesTable from "@/components/SubpagesTable";
+import PageMovePicker from "@/components/PageMovePicker";
+import { deletePages, deletionMessage, movePage, planDeletion } from "@/lib/page-ops";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
@@ -29,6 +32,8 @@ function PageView({ id }: { id: string }) {
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editorVersion, setEditorVersion] = useState(0);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [movingSelf, setMovingSelf] = useState(false);
 
   const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -125,13 +130,7 @@ function PageView({ id }: { id: string }) {
       const current = row as PageRow;
       setPage(current);
 
-      const { data: kids } = await supabase
-        .from("pages")
-        .select("*")
-        .eq("parent_id", id)
-        .order("position")
-        .order("created_at");
-      setChildren((kids ?? []) as PageRow[]);
+      await loadChildren();
 
       const trail: Crumb[] = [];
       let parent = current.parent_id;
@@ -143,7 +142,12 @@ function PageView({ id }: { id: string }) {
       }
       setCrumbs(trail);
     })();
-  }, [id]);
+  }, [id, reloadKey]);
+
+  async function loadChildren() {
+    const { data: kids } = await supabase.from("pages").select("*").eq("parent_id", id).order("position").order("created_at");
+    setChildren((kids ?? []) as PageRow[]);
+  }
 
   async function addChild(kind: "lesson" | "page") {
     const row =
@@ -152,20 +156,11 @@ function PageView({ id }: { id: string }) {
         : { title: "Nova página", type: "page" };
     const { data, error } = await supabase
       .from("pages")
-      .insert({ ...row, parent_id: id })
+      .insert({ ...row, parent_id: id, position: children.length })
       .select("id")
       .single();
     if (error || !data) return setError("Não foi possível criar a página.");
     router.push(`/p/${data.id}`);
-  }
-
-  async function updateChild(childId: string, patch: Partial<PageRow>) {
-    const { error } = await supabase.from("pages").update(patch).eq("id", childId);
-    if (error) setError("Não foi possível salvar a alteração na tabela.");
-  }
-
-  function editChildLocal(childId: string, patch: Partial<PageRow>) {
-    setChildren((list) => list.map((c) => (c.id === childId ? { ...c, ...patch } : c)));
   }
 
   async function onCover(file: File | undefined) {
@@ -179,16 +174,19 @@ function PageView({ id }: { id: string }) {
 
   async function remove() {
     if (!page) return;
-    const ok = window.confirm(
-      children.length > 0
-        ? "Excluir esta página e todas as páginas dentro dela? Isso não pode ser desfeito."
-        : "Excluir esta página? Isso não pode ser desfeito."
-    );
-    if (!ok) return;
+    const plan = await planDeletion(id);
+    if (!plan) return setError("Não foi possível conferir o que será excluído. Tente de novo.");
+    if (!window.confirm(deletionMessage(page.title, plan))) return;
     pending.current = {};
-    const { error } = await supabase.from("pages").delete().eq("id", id);
-    if (error) return setError("Não foi possível excluir.");
+    if (!(await deletePages(plan.ids))) return setError("Não foi possível excluir.");
     router.push(page.parent_id ? `/p/${page.parent_id}` : "/");
+  }
+
+  async function moveSelf(destination: string | null) {
+    setMovingSelf(false);
+    if (!(await movePage(id, destination))) return setError("Não foi possível mover esta página.");
+    setError(null);
+    setReloadKey((key) => key + 1);
   }
 
   if (notFound) return <p className="empty">Página não encontrada. <Link href="/">Voltar ao início</Link></p>;
@@ -197,53 +195,15 @@ function PageView({ id }: { id: string }) {
   const isLesson = page.type === "lesson";
 
   const table = (
-    <section className="subpages">
-      <div className="head">
-        <h2>{isLesson ? "Páginas dentro desta aula" : "Aulas e páginas"}</h2>
-        <div className="row">
-          <button className="primary" onClick={() => addChild("lesson")}>Nova aula</button>
-          <button className="secondary" onClick={() => addChild("page")}>Nova página</button>
-        </div>
-      </div>
-      {children.length === 0 ? (
-        <p className="empty">Nada aqui ainda. Crie uma aula para registrar tema, data e anotações.</p>
-      ) : (
-        <div className="table-wrap">
-          <table className="data">
-            <thead>
-              <tr><th>Aula / tema</th><th>Data</th><th></th></tr>
-            </thead>
-            <tbody>
-              {children.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <input
-                      value={c.title}
-                      aria-label="Título"
-                      onChange={(e) => editChildLocal(c.id, { title: e.target.value })}
-                      onBlur={(e) => updateChild(c.id, { title: e.target.value })}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="date"
-                      value={c.props?.date ?? ""}
-                      aria-label="Data"
-                      onChange={(e) => {
-                        const props = { ...c.props, date: e.target.value };
-                        editChildLocal(c.id, { props });
-                        updateChild(c.id, { props });
-                      }}
-                    />
-                  </td>
-                  <td><Link className="open" href={`/p/${c.id}`}>Abrir</Link></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
+    <SubpagesTable
+      parent={page}
+      grandparent={crumbs.length ? crumbs[crumbs.length - 1] : null}
+      items={children}
+      setItems={(updater) => setChildren(updater)}
+      reload={loadChildren}
+      onAdd={addChild}
+      onError={setError}
+    />
   );
 
     const editor = (
@@ -324,7 +284,11 @@ function PageView({ id }: { id: string }) {
 
       {isLesson ? <>{editor}{table}</> : <>{table}{editor}</>}
       <PageAssistant pageId={id} title={page.title} content={toDoc(page.content)} onInsert={insertAssistantText} />
-      <button className="danger" onClick={remove}>Excluir página</button>
+      <div className="page-footer-actions">
+        <button className="secondary" onClick={() => setMovingSelf(true)}>Mover esta página…</button>
+        <button className="danger" onClick={remove}>Excluir página</button>
+      </div>
+      {movingSelf && <PageMovePicker mode="move" moving={{ id: page.id, title: page.title, icon: page.icon, type: page.type, parent_id: page.parent_id }} onClose={() => setMovingSelf(false)} onPick={(destination) => void moveSelf(destination)} />}
     </>
   );
 }

@@ -831,3 +831,44 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .rv-evo { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); padding: 0 14px 12px; margin-bottom: 12px; }
 .rv-evo > summary { padding: 12px 0; font-weight: 700; cursor: pointer; color: var(--accent); }
 .rh-main small { display: block; }
+
+/* ---------- organizar cadernos, aulas e páginas ---------- */
+.row-actions { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.row-tools { display: inline-flex; align-items: center; gap: 2px; }
+.row-btn { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 9px; background: transparent; color: var(--muted); }
+.row-btn:hover:not(:disabled), .row-btn[aria-expanded="true"] { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent); }
+.row-btn:disabled { opacity: .3; cursor: default; }
+.row-menu { position: fixed; z-index: 70; display: grid; min-width: 210px; max-width: calc(100vw - 16px); padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 16px 40px rgba(27, 36, 48, .18); }
+.row-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: .9rem; text-align: left; }
+.row-menu button:hover, .row-menu button:focus-visible { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); outline: none; }
+.row-menu button.is-danger { color: var(--danger); }
+.row-menu button.is-danger:hover { background: #fdf0ee; }
+.with-icon { display: inline-flex; align-items: center; gap: 7px; }
+.list-actions li { padding-right: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.list-actions li > a { flex: 1; min-width: 0; }
+.page-footer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 32px; }
+.page-footer-actions .danger { margin-top: 0; }
+.pm-overlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(27, 36, 48, .4); }
+.pm-dialog { display: flex; flex-direction: column; width: min(560px, 100%); max-height: min(82vh, 720px); border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: 0 24px 64px rgba(27, 36, 48, .22); overflow: hidden; }
+.pm-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 18px 8px; }
+.pm-head h2 { margin: 0; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
+.pm-head p { margin: 4px 0 0; color: var(--muted); font-size: .85rem; }
+.pm-close { display: grid; place-items: center; flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--muted); }
+.pm-search { display: flex; align-items: center; gap: 8px; margin: 6px 18px 10px; padding: 0 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--muted); }
+.pm-search:focus-within { border-color: var(--accent); }
+.pm-search input { flex: 1; min-width: 0; padding: 11px 0; border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; }
+.pm-list { flex: 1; min-height: 120px; padding: 0 10px 12px; overflow-y: auto; }
+.pm-empty { margin: 18px 10px; color: var(--muted); font-size: .9rem; }
+.pm-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); font: inherit; text-align: left; }
+.pm-item:hover:not(:disabled), .pm-item:focus-visible { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); outline: none; }
+.pm-item:disabled { opacity: .5; cursor: default; }
+.pm-icon { flex: 0 0 auto; font-size: 1.15rem; }
+.pm-text { display: grid; flex: 1; gap: 1px; min-width: 0; }
+.pm-text strong { overflow: hidden; font-size: .93rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.pm-text small { overflow: hidden; color: var(--muted); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.pm-tag { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 9%, var(--surface)); color: var(--muted); font-size: .7rem; }
+@media (max-width: 650px) {
+  .pm-overlay { align-items: flex-end; padding: 0; }
+  .pm-dialog { width: 100%; max-height: 88vh; border-radius: 18px 18px 0 0; border-bottom: 0; }
+  .subpages .head .row { flex-wrap: wrap; }
+}

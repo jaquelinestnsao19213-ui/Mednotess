@@ -8,3 +8,4 @@ storage.setItem("sb-127-auth-token", JSON.stringify({
 }));
 (dom.window as unknown as { matchMedia: unknown }).matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
 Object.assign(globalThis, { matchMedia: (dom.window as unknown as { matchMedia: unknown }).matchMedia, innerHeight: dom.window.innerHeight });
+Object.assign(globalThis, { self: dom.window });

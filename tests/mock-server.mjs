@@ -73,6 +73,7 @@ function rest(req, res, user, url, bodyText) {
   const single = (req.headers.accept ?? "").includes("vnd.pgrst.object");
   const out = (list) => (single ? (list[0] ? json(res, 200, list[0]) : json(res, 406, { code: "PGRST116", message: "0 rows" })) : json(res, 200, list));
   const mine = () => rows.filter((r) => r.user_id === user && matches(r, url.searchParams));
+  if (req.method === "HEAD") { const n = mine().length; res.writeHead(200, { "content-range": `0-0/${n}`, "content-type": "application/json" }); return res.end(); }
   if (req.method === "GET") {
     let list = mine();
     const order = url.searchParams.get("order");
