@@ -14,6 +14,7 @@ const NAV = [
   { href: "/cadernos", label: "Cadernos" },
   { href: "/revisoes", label: "Revisões" },
   { href: "/avaliacoes", label: "Avaliações" },
+  { href: "/desempenho", label: "Desempenho" },
 ];
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {

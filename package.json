@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "npx --yes tsx --test tests/logic.test.ts tests/notes-format.test.ts tests/page-tree.test.ts tests/image-strokes.test.ts tests/topic-links.test.ts tests/topic-tree.test.ts tests/block-move.test.ts"
+    "test": "npx --yes tsx --test tests/logic.test.ts tests/notes-format.test.ts tests/page-tree.test.ts tests/image-strokes.test.ts tests/topic-links.test.ts tests/topic-tree.test.ts tests/block-move.test.ts tests/mastery.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
