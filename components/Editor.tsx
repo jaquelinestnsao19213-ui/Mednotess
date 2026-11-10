@@ -18,7 +18,11 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
+import { AudioNote, VideoNote } from "./editor/media-extensions";
+import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
+import MediaIndex from "./editor/MediaIndex";
 import { fileExtension, uploadFile } from "@/lib/upload";
+import { extFromFile, mediaErrorMessage, mediaKindOf, parseVideoLink, uploadMedia } from "@/lib/media";
 import { Slice } from "@tiptap/pm/model";
 import { richClipboard } from "@/lib/copy-html";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
@@ -131,6 +135,8 @@ export default function Editor({
 }) {
   const imageInput = useRef<HTMLInputElement>(null);
   const pdfInput = useRef<HTMLInputElement>(null);
+  const audioInput = useRef<HTMLInputElement>(null);
+  const videoInput = useRef<HTMLInputElement>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -142,6 +148,10 @@ export default function Editor({
   const [linkBox, setLinkBox] = useState(false);
   const [linkValue, setLinkValue] = useState("");
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [recorder, setRecorder] = useState(false);
+  const [videoLinkBox, setVideoLinkBox] = useState(false);
+  const [videoLinkValue, setVideoLinkValue] = useState("");
+  const [videoLinkError, setVideoLinkError] = useState<string | null>(null);
 
   const slashRef = useRef(slash);
   slashRef.current = slash;
@@ -149,6 +159,7 @@ export default function Editor({
   indexRef.current = slashIndex;
   const editorRef = useRef<TipEditor | null>(null);
   const imagesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
+  const mediaRef = useRef<(files: File[], forced?: "audio" | "video") => Promise<void>>(async () => {});
 
   const allItems: Cmd[] = [
     ...BLOCKS,
@@ -157,6 +168,10 @@ export default function Editor({
     { label: "Colar imagem", keywords: "colar imagem foto copiar area transferencia print", run: () => { void pasteImageFromClipboard(); } },
     { label: "PDF", keywords: "pdf arquivo anexo", run: () => pdfInput.current?.click() },
     { label: "Site", keywords: "site link url pagina web incorporar embed", run: () => { setLinkValue(""); setLinkError(null); setLinkBox(true); } },
+    { label: "Gravar áudio", keywords: "gravar audio microfone voz explicacao gravacao", run: () => setRecorder(true) },
+    { label: "Áudio (arquivo)", keywords: "audio mp3 m4a som arquivo enviar upload", run: () => audioInput.current?.click() },
+    { label: "Vídeo (arquivo)", keywords: "video mp4 arquivo enviar upload", run: () => videoInput.current?.click() },
+    { label: "Vídeo (link)", keywords: "video youtube vimeo link aula", run: () => { setVideoLinkValue(""); setVideoLinkError(null); setVideoLinkBox(true); } },
   ];
   const filtered = (q: string) => {
     const t = q.trim().toLowerCase();
@@ -219,6 +234,8 @@ export default function Editor({
       Toggle,
       FileCard,
       WebEmbed,
+      AudioNote,
+      VideoNote,
       TrailingNode,
     ],
     content: initial,
@@ -278,7 +295,15 @@ export default function Editor({
       },
       handleDrop: (view, event, _slice, moved) => {
         if (moved) return false; // arrastar blocos dentro da página continua normal
-        const dropped = Array.from(event.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/"));
+        const files = Array.from(event.dataTransfer?.files ?? []);
+        // Áudio/vídeo solto na página (computador): envia e insere o player.
+        const media = files.filter((f) => mediaKindOf(f) !== null);
+        if (media.length) {
+          event.preventDefault();
+          void mediaRef.current(media);
+          return true;
+        }
+        const dropped = files.filter((f) => f.type.startsWith("image/"));
         if (!dropped.length) return false;
         event.preventDefault();
         const at = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
@@ -339,6 +364,69 @@ export default function Editor({
     }
   }
   imagesRef.current = insertImages;
+
+  // Envia áudios/vídeos escolhidos (ou soltos na página) e insere um player para cada um, na posição do cursor.
+  async function insertMediaFiles(files: File[], forced?: "audio" | "video") {
+    const e = editorRef.current;
+    if (!e || !files.length) return;
+    for (const file of files) {
+      const kind = forced ?? mediaKindOf(file);
+      if (!kind) {
+        setMessage(`“${file.name}” não parece ser um áudio ou vídeo que o navegador consegue tocar.`);
+        continue;
+      }
+      setMessage(kind === "audio" ? "Enviando áudio…" : "Enviando vídeo… arquivos grandes podem demorar um pouco.");
+      try {
+        const url = await uploadMedia(file, extFromFile(file));
+        const title = file.name.replace(/\.[^.]+$/, "");
+        if (kind === "audio") {
+          e.chain().focus().insertContent({ type: "audioNote", attrs: { url, title, description: "", duration: 0, recorded: false } }).run();
+        } else {
+          e.chain().focus().insertContent({ type: "videoNote", attrs: { kind: "file", url, title, subject: "", description: "" } }).run();
+        }
+        setMessage(null);
+      } catch (cause) {
+        setMessage(mediaErrorMessage(cause));
+        return;
+      }
+    }
+  }
+  mediaRef.current = insertMediaFiles;
+
+  // Salva a gravação feita no app: envia ao Storage e insere o player na página.
+  async function saveRecording(data: RecordingData) {
+    const e = editorRef.current;
+    if (!e) throw new Error("O editor não está pronto. Tente de novo.");
+    let url: string;
+    try {
+      url = await uploadMedia(data.blob, data.ext);
+    } catch (cause) {
+      throw new Error(mediaErrorMessage(cause));
+    }
+    const stamp = new Date().toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    e.chain()
+      .focus()
+      .insertContent({
+        type: "audioNote",
+        attrs: { url, title: data.title || `Gravação ${stamp}`, description: data.description, duration: data.duration, recorded: true },
+      })
+      .run();
+    setRecorder(false);
+  }
+
+  function insertVideoLink() {
+    const e = editorRef.current;
+    if (!e) return;
+    const parsed = parseVideoLink(videoLinkValue);
+    if (!parsed) {
+      setVideoLinkError("Use o link de um vídeo do YouTube, do Vimeo ou de um arquivo .mp4. Exemplo: https://youtu.be/…");
+      return;
+    }
+    e.chain().focus().insertContent({ type: "videoNote", attrs: { kind: parsed.kind, url: parsed.url, title: "", subject: "", description: "" } }).run();
+    setVideoLinkBox(false);
+    setVideoLinkValue("");
+    setVideoLinkError(null);
+  }
 
   // Copia a página toda (texto, títulos, cores, listas, tabelas, avisos e imagens) pronta para colar em outro app.
   async function copyWholePage() {
@@ -454,6 +542,7 @@ export default function Editor({
         </div>
       </BubbleMenu>
 
+      <MediaIndex editor={editor} />
       <EditorContent editor={editor} />
       {message && <p className="notice">{message}</p>}
       {slash && items.length > 0 && (
@@ -609,6 +698,7 @@ export default function Editor({
             <button type="button" aria-label="Lista com marcadores" className={editor.isActive("bulletList") ? "on" : ""} onClick={() => chain().toggleBulletList().run()}>•</button>
             <button type="button" aria-label="Lista de tarefas" className={editor.isActive("taskList") ? "on" : ""} onClick={() => chain().toggleTaskList().run()}>☑</button>
             <button type="button" aria-label="Inserir imagem" onClick={() => imageInput.current?.click()}>Img</button>
+            <button type="button" aria-label="Gravar áudio" onClick={() => setRecorder(true)}>🎙</button>
             <button type="button" aria-label="Baixar PDF" className="pdf-export-btn" onClick={exportPdf}>PDF</button>
             <button type="button" aria-label="Desfazer" disabled={!editor.can().undo()} onClick={() => chain().undo().run()}>↶</button>
             <button type="button" aria-label="Refazer" disabled={!editor.can().redo()} onClick={() => chain().redo().run()}>↷</button>
@@ -639,8 +729,34 @@ export default function Editor({
         </div>
       )}
 
+      {videoLinkBox && (
+        <div className="sheet link-box" onMouseDown={(e) => e.stopPropagation()}>
+          <label className="link-box-label" htmlFor="video-url">Link do vídeo (YouTube, Vimeo ou .mp4)</label>
+          <input
+            id="video-url"
+            className="link-box-input"
+            type="url"
+            inputMode="url"
+            autoFocus
+            placeholder="https://youtu.be/…"
+            value={videoLinkValue}
+            onChange={(e) => { setVideoLinkValue(e.target.value); setVideoLinkError(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); insertVideoLink(); } if (e.key === "Escape") setVideoLinkBox(false); }}
+          />
+          {videoLinkError && <p className="link-box-error">{videoLinkError}</p>}
+          <div className="sheet-row">
+            <button type="button" className="chip on" onClick={insertVideoLink}>Inserir vídeo</button>
+            <button type="button" className="chip" onClick={() => setVideoLinkBox(false)}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {recorder && <AudioRecorder onClose={() => setRecorder(false)} onSave={saveRecording} />}
+
       <input ref={imageInput} type="file" accept="image/*" hidden onChange={(e) => { send(e.target.files?.[0], "image"); e.target.value = ""; }} />
       <input ref={pdfInput} type="file" accept="application/pdf" hidden onChange={(e) => { send(e.target.files?.[0], "pdf"); e.target.value = ""; }} />
+      <input ref={audioInput} type="file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.opus,.flac,.webm" multiple hidden onChange={(e) => { void insertMediaFiles(Array.from(e.target.files ?? []), "audio"); e.target.value = ""; }} />
+      <input ref={videoInput} type="file" accept="video/*,.mp4,.mov,.m4v,.webm" multiple hidden onChange={(e) => { void insertMediaFiles(Array.from(e.target.files ?? []), "video"); e.target.value = ""; }} />
     </div>
   );
 }

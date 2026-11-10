@@ -40,6 +40,15 @@ export function docToText(node: unknown): string {
   if (n.type === "text") return n.text ?? "";
   if (n.type === "fileCard") return `[PDF anexado: ${String(n.attrs?.name ?? "arquivo")}]\n`;
   if (n.type === "webEmbed") return `[Site incorporado: ${String(n.attrs?.title || n.attrs?.url || "")}]\n`;
+  // Áudios e vídeos: só o título/descrição entram como texto. O conteúdo do áudio nunca é transcrito nem enviado.
+  if (n.type === "audioNote") {
+    const description = n.attrs?.description ? ` — ${String(n.attrs.description)}` : "";
+    return `[Áudio: ${String(n.attrs?.title || "sem título")}${description}]\n`;
+  }
+  if (n.type === "videoNote") {
+    const subject = n.attrs?.subject ? ` (${String(n.attrs.subject)})` : "";
+    return `[Vídeo: ${String(n.attrs?.title || n.attrs?.url || "sem título")}${subject}]\n`;
+  }
   const inner = (n.content ?? []).map(docToText);
   const text = n.type === "tableRow" ? inner.join(" | ") : inner.join("");
   const blocks = ["paragraph", "heading", "listItem", "taskItem", "tableRow", "blockquote", "codeBlock"];
