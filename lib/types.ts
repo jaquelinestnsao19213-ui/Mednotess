@@ -97,3 +97,15 @@ export type TopicLink = {
   position: number;
   created_at: string;
 };
+
+// Avaliação cadastrada na Central de Avaliações. Existe depois de executar o schema18.sql.
+export type StudyExam = {
+  id: string;
+  user_id: string;
+  title: string;
+  kind: string;
+  exam_date: string;
+  topic_ids: string[];
+  planned_at: string | null;
+  created_at: string;
+};

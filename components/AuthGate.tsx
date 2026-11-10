@@ -13,6 +13,7 @@ const NAV = [
   { href: "/disciplinas", label: "Disciplinas" },
   { href: "/cadernos", label: "Cadernos" },
   { href: "/revisoes", label: "Revisões" },
+  { href: "/avaliacoes", label: "Avaliações" },
 ];
 
 export default function AuthGate({ children }: { children: React.ReactNode }) {
