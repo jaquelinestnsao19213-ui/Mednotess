@@ -153,6 +153,16 @@ export default function Dashboard() {
             </span>
           </Link>
 
+          <Link href="/desempenho" className="workspace-card workspace-notes">
+            <span className="workspace-icon" aria-hidden="true">📈</span>
+            <span className="workspace-label">EVOLUÇÃO</span>
+            <strong>Desempenho</strong>
+            <span>Aproveitamento, retenção e assuntos que precisam de reforço.</span>
+            <span className="workspace-link">
+              Ver painel <b aria-hidden="true">↗</b>
+            </span>
+          </Link>
+
           <Link href="/reunioes" className="workspace-card workspace-planner">
             <span className="workspace-icon" aria-hidden="true">🎙</span>
             <span className="workspace-label">INTELIGÊNCIA ARTIFICIAL</span>
