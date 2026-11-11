@@ -165,3 +165,24 @@ test("validação da IA: trecho inventado cai, laços e cores inválidas são co
   ], { nodeIds: new Set(["n1"]), pages });
   assert.deepEqual(ops.map((o) => o.op), ["add_node", "add_node", "add_edge"]);
 });
+
+test("resposta da IA cortada no meio: aproveita os nós completos em vez de perder o mapa", async () => {
+  const { parseMapJson, salvageArray } = await import("../lib/mindmap-ai");
+  const cortada = '{"message":"Mapa de AINEs.","nodes":[{"key":"a","label":"AINEs","parent":null},{"key":"b","label":"COX","detail":"Inibe a \\"COX\\"; ok","parent":"a"},{"key":"c","label":"Prosta';
+  assert.equal(salvageArray(cortada, "nodes").length, 2);
+  const { data, salvaged } = parseMapJson(cortada);
+  assert.equal(salvaged, true);
+  assert.equal(data!.message, "Mapa de AINEs.");
+  const gen = sanitizeGenerated(data, [])!;
+  assert.deepEqual(gen.nodes.map((n) => n.key), ["a", "b"]);
+  assert.equal(gen.nodes[1].detail, 'Inibe a "COX"; ok');
+  // com cercas de Markdown e texto em volta, JSON inteiro
+  const cercada = 'Claro!\n```json\n{"message":"ok","nodes":[{"key":"x","label":"X"}],"links":[]}\n```';
+  assert.equal(parseMapJson(cercada).salvaged, false);
+  assert.equal(sanitizeGenerated(parseMapJson(cercada).data, [])!.nodes.length, 1);
+  // lixo total
+  assert.equal(sanitizeGenerated(parseMapJson("desculpe, não consegui").data, []), null);
+  // comandos (ops) cortados
+  const ops = parseMapJson('{"message":"fiz","ops":[{"op":"add_node","label":"A"},{"op":"add_node","lab').data!;
+  assert.equal((ops.ops as unknown[]).length, 1);
+});

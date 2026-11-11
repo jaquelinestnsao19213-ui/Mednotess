@@ -1,5 +1,6 @@
 // Validação do que a IA devolve para mapas mentais. A IA nunca é confiável: tudo é checado antes de entrar no mapa.
 import { PALETTE, type Generated, type GenLink, type GenNode, type MapOp } from "./mindmap";
+import { parseModelObject } from "./server/review-ai";
 
 export type SourcePage = { id: string; title: string; text: string };
 
@@ -103,4 +104,43 @@ export function sanitizeOps(raw: unknown, ctx: { nodeIds: Set<string>; pages: So
     // qualquer outra operação (inclusive excluir) é ignorada de propósito: a IA só acrescenta ou ajusta
   }
   return ops;
+}
+
+/* ---------- leitura tolerante da resposta ---------- */
+
+/** Recupera os objetos COMPLETOS de um array (`"nodes": [ {...}, {...}, {...cortado`) mesmo se a resposta foi cortada. */
+export function salvageArray(raw: string, key: string): unknown[] {
+  const match = new RegExp(`"${key}"\\s*:\\s*\\[`).exec(raw);
+  if (!match) return [];
+  const items: unknown[] = [];
+  let depth = 0, start = -1, inString = false, escaped = false;
+  for (let i = match.index + match[0].length; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try { items.push(JSON.parse(raw.slice(start, i + 1))); } catch { /* item quebrado: ignora */ }
+        start = -1;
+      }
+    } else if (ch === "]" && depth === 0) break;
+  }
+  return items;
+}
+
+/** JSON do mapa: aceita cercas de Markdown, texto em volta e resposta cortada no meio (aproveita o que veio inteiro). */
+export function parseMapJson(raw: string): { data: Record<string, unknown> | null; salvaged: boolean } {
+  const direct = parseModelObject(raw);
+  if (direct && (Array.isArray(direct.nodes) || Array.isArray(direct.ops))) return { data: direct, salvaged: false };
+  const nodes = salvageArray(raw, "nodes"), ops = salvageArray(raw, "ops"), links = salvageArray(raw, "links");
+  if (!nodes.length && !ops.length) return { data: direct, salvaged: false };
+  const message = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? "";
+  return { data: { message, nodes, links, ops }, salvaged: true };
 }
