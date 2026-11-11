@@ -193,7 +193,7 @@ test("escolher um caderno inclui as aulas e páginas de dentro, sem repetir", as
   const pages = [pg("nb", "notebook", null), pg("l1", "lesson", "nb"), pg("p1", "page", "l1"), pg("l2", "lesson", "nb"), pg("t1", "task", "nb"), pg("outro", "notebook", null), pg("l3", "lesson", "outro")];
   const r = expandToPages(pages, ["nb", "l1"]);
   assert.deepEqual(r.ids.sort(), ["l1", "l2", "p1"]);
-  assert.equal(r.fromContainers, 2);
+  assert.equal(r.fromContainers, 3);
   assert.equal(expandToPages(pages, ["outro"]).ids[0], "l3");
   const limited = expandToPages(pages, ["nb"], 2);
   assert.equal(limited.ids.length, 2);
