@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "test:mapas": "npx --yes tsx --test tests/mindmap.test.ts tests/mindmap-autosave.test.ts",
     "build": "next build",
     "start": "next start",
     "test": "npx --yes tsx --test tests/logic.test.ts tests/notes-format.test.ts tests/page-tree.test.ts tests/image-strokes.test.ts tests/topic-links.test.ts tests/topic-tree.test.ts tests/block-move.test.ts"
@@ -30,6 +31,7 @@
     "@tiptap/pm": "^2.27.3",
     "@tiptap/react": "^2.27.3",
     "@tiptap/starter-kit": "^2.27.3",
+    "@xyflow/react": "^12.12.1",
     "linkedom": "^0.18.15",
     "lucide-react": "^1.16.0",
     "next": "^15.1.0",
