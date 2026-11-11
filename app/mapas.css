@@ -129,3 +129,9 @@
 .mm-msg-user { background: #eaf0ff; justify-self: end; max-width: 92%; }
 .mm-msg-ai { background: #f4f0fa; }
 .mm-msg-error { background: #fde8e6; color: #7a1810; }
+
+.mm-progress { display: grid; gap: 6px; padding: 12px; border: 1px solid #d9c9f0; border-radius: 12px; background: #faf6ff; }
+.mm-progress-bar { height: 8px; border-radius: 99px; background: #e9defa; overflow: hidden; }
+.mm-progress-bar i { display: block; height: 100%; background: #7550a4; transition: width .4s; }
+.mm-progress small { color: var(--muted, #667085); font-size: .78rem; }
+.mm-warn-text { color: #9a6228 !important; }

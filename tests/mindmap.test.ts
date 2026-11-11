@@ -186,3 +186,25 @@ test("resposta da IA cortada no meio: aproveita os nós completos em vez de perd
   const ops = parseMapJson('{"message":"fiz","ops":[{"op":"add_node","label":"A"},{"op":"add_node","lab').data!;
   assert.equal((ops.ops as unknown[]).length, 1);
 });
+
+test("escolher um caderno inclui as aulas e páginas de dentro, sem repetir", async () => {
+  const { expandToPages } = await import("../lib/mindmap-expand");
+  const pg = (id: string, type: string, parent: string | null) => ({ id, title: id, icon: null, type, parent_id: parent }) as never;
+  const pages = [pg("nb", "notebook", null), pg("l1", "lesson", "nb"), pg("p1", "page", "l1"), pg("l2", "lesson", "nb"), pg("t1", "task", "nb"), pg("outro", "notebook", null), pg("l3", "lesson", "outro")];
+  const r = expandToPages(pages, ["nb", "l1"]);
+  assert.deepEqual(r.ids.sort(), ["l1", "l2", "p1"]);
+  assert.equal(r.fromContainers, 2);
+  assert.equal(expandToPages(pages, ["outro"]).ids[0], "l3");
+  const limited = expandToPages(pages, ["nb"], 2);
+  assert.equal(limited.ids.length, 2);
+  assert.equal(limited.truncated, true);
+});
+
+test("ligações entre disciplinas: só chaves reais, sem duplicata, sempre marcadas como sugestão", async () => {
+  const { sanitizeLinks } = await import("../lib/mindmap-ai");
+  const keys = new Set(["a", "b", "c"]);
+  const links = sanitizeLinks([{ from: "a", to: "b", label: "leva a" }, { from: "b", to: "a" }, { from: "a", to: "zzz" }, { from: "c", to: "c" }, { from: "c", to: "a", label: "x".repeat(200) }], keys);
+  assert.equal(links.length, 2);
+  assert.ok(links.every((l) => l.inferred === true));
+  assert.equal(links[1].label!.length, 60);
+});

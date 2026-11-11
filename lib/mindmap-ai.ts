@@ -34,7 +34,8 @@ export function sanitizeGenerated(raw: Record<string, unknown> | null, pages: So
     const key = slug(str(r.key, 60));
     if (!label || !key || keys.has(key)) continue;
     keys.add(key);
-    const src = checkedSource(pages, r.pageId, r.excerpt);
+    // com uma única anotação, o trecho é conferido nela mesmo que a IA não repita o id
+    const src = checkedSource(pages, r.pageId ?? (pages.length === 1 ? pages[0].id : undefined), r.excerpt);
     nodes.push({
       key,
       label,
@@ -140,7 +141,23 @@ export function parseMapJson(raw: string): { data: Record<string, unknown> | nul
   const direct = parseModelObject(raw);
   if (direct && (Array.isArray(direct.nodes) || Array.isArray(direct.ops))) return { data: direct, salvaged: false };
   const nodes = salvageArray(raw, "nodes"), ops = salvageArray(raw, "ops"), links = salvageArray(raw, "links");
-  if (!nodes.length && !ops.length) return { data: direct, salvaged: false };
+  if (!nodes.length && !ops.length && !links.length) return { data: direct, salvaged: false };
   const message = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? "";
   return { data: { message, nodes, links, ops }, salvaged: true };
+}
+
+/** Conexões propostas pela IA entre conceitos de anotações/disciplinas diferentes. Sempre marcadas como sugestão (a IA não viu o texto completo). */
+export function sanitizeLinks(raw: unknown, keys: Set<string>, max = 40): GenLink[] {
+  const links: GenLink[] = [];
+  const seen = new Set<string>();
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (links.length >= max) break;
+    const r = (item ?? {}) as Record<string, unknown>;
+    const from = typeof r.from === "string" ? r.from : "", to = typeof r.to === "string" ? r.to : "";
+    const pair = [from, to].sort().join("|");
+    if (!keys.has(from) || !keys.has(to) || from === to || seen.has(pair)) continue;
+    seen.add(pair);
+    links.push({ from, to, label: str(r.label, 60) || undefined, inferred: true });
+  }
+  return links;
 }
