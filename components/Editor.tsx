@@ -19,6 +19,7 @@ import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
+import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
 import MediaIndex from "./editor/MediaIndex";
 import { fileExtension, uploadFile } from "@/lib/upload";
@@ -237,6 +238,7 @@ export default function Editor({
       AudioNote,
       VideoNote,
       TrailingNode,
+      PasteEnhancer,
     ],
     content: initial,
     onCreate: ({ editor }) => {
