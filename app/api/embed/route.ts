@@ -16,7 +16,7 @@ const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const MAX_MESSAGES_WITH_FILES = 2; // só as 2 últimas mensagens com anexo reenviam o arquivo à IA
 const MAX_PAGE_CONTEXT = 24_000;
 const MAX_TOOL_ROUNDS = 5;
-const MODEL = "claude-sonnet-5-5";
+const MODEL = process.env.CHAT_MODEL || process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 
 /* ---------- SYSTEM PROMPT DA MARIA - ESPECIALIZADA EM MEDICINA ---------- */
 const MARIA_MEDICINE_SYSTEM_PROMPT = `Você é a Maria, preceptora acadêmica e assistente de IA integrada ao Mednotes, especializada no ensino superior de Medicina.
