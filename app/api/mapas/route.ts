@@ -8,7 +8,7 @@ import { HttpError, describeAiError, logError, textOf } from "@/lib/server/revie
 
 export const maxDuration = 120;
 
-const MODEL = "claude-sonnet-5-5";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 const AI_DEADLINE_MS = Number(process.env.REVIEW_AI_DEADLINE_MS) || 105_000;
 const MAX_BODY_BYTES = 300_000;
 const MAX_PAGES = 12;
