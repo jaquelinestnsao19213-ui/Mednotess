@@ -145,6 +145,10 @@ function Editor({ id }: { id: string }) {
         setSources(record.sourcePageIds);
         setPages(tree);
         setPhase("ready");
+        try {
+          const notice = sessionStorage.getItem("mm-notice");
+          if (notice) { sessionStorage.removeItem("mm-notice"); setMessages([{ id: uid("m"), role: "ai", text: notice }]); setToast({ text: "Mapa criado. Há um aviso no Assistente IA (✦)." }); setTimeout(() => setToast(null), 8000); }
+        } catch { /* sem aviso */ }
       } catch (e) {
         if (!alive) return;
         setLoadError(e instanceof Error ? e.message : "Não foi possível abrir o mapa.");

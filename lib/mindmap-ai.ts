@@ -1,5 +1,6 @@
 // Validação do que a IA devolve para mapas mentais. A IA nunca é confiável: tudo é checado antes de entrar no mapa.
 import { PALETTE, type Generated, type GenLink, type GenNode, type MapOp } from "./mindmap";
+import { parseModelObject } from "./server/review-ai";
 
 export type SourcePage = { id: string; title: string; text: string };
 
@@ -33,7 +34,8 @@ export function sanitizeGenerated(raw: Record<string, unknown> | null, pages: So
     const key = slug(str(r.key, 60));
     if (!label || !key || keys.has(key)) continue;
     keys.add(key);
-    const src = checkedSource(pages, r.pageId, r.excerpt);
+    // com uma única anotação, o trecho é conferido nela mesmo que a IA não repita o id
+    const src = checkedSource(pages, r.pageId ?? (pages.length === 1 ? pages[0].id : undefined), r.excerpt);
     nodes.push({
       key,
       label,
@@ -103,4 +105,59 @@ export function sanitizeOps(raw: unknown, ctx: { nodeIds: Set<string>; pages: So
     // qualquer outra operação (inclusive excluir) é ignorada de propósito: a IA só acrescenta ou ajusta
   }
   return ops;
+}
+
+/* ---------- leitura tolerante da resposta ---------- */
+
+/** Recupera os objetos COMPLETOS de um array (`"nodes": [ {...}, {...}, {...cortado`) mesmo se a resposta foi cortada. */
+export function salvageArray(raw: string, key: string): unknown[] {
+  const match = new RegExp(`"${key}"\\s*:\\s*\\[`).exec(raw);
+  if (!match) return [];
+  const items: unknown[] = [];
+  let depth = 0, start = -1, inString = false, escaped = false;
+  for (let i = match.index + match[0].length; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        try { items.push(JSON.parse(raw.slice(start, i + 1))); } catch { /* item quebrado: ignora */ }
+        start = -1;
+      }
+    } else if (ch === "]" && depth === 0) break;
+  }
+  return items;
+}
+
+/** JSON do mapa: aceita cercas de Markdown, texto em volta e resposta cortada no meio (aproveita o que veio inteiro). */
+export function parseMapJson(raw: string): { data: Record<string, unknown> | null; salvaged: boolean } {
+  const direct = parseModelObject(raw);
+  if (direct && (Array.isArray(direct.nodes) || Array.isArray(direct.ops))) return { data: direct, salvaged: false };
+  const nodes = salvageArray(raw, "nodes"), ops = salvageArray(raw, "ops"), links = salvageArray(raw, "links");
+  if (!nodes.length && !ops.length && !links.length) return { data: direct, salvaged: false };
+  const message = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(raw)?.[1] ?? "";
+  return { data: { message, nodes, links, ops }, salvaged: true };
+}
+
+/** Conexões propostas pela IA entre conceitos de anotações/disciplinas diferentes. Sempre marcadas como sugestão (a IA não viu o texto completo). */
+export function sanitizeLinks(raw: unknown, keys: Set<string>, max = 40): GenLink[] {
+  const links: GenLink[] = [];
+  const seen = new Set<string>();
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (links.length >= max) break;
+    const r = (item ?? {}) as Record<string, unknown>;
+    const from = typeof r.from === "string" ? r.from : "", to = typeof r.to === "string" ? r.to : "";
+    const pair = [from, to].sort().join("|");
+    if (!keys.has(from) || !keys.has(to) || from === to || seen.has(pair)) continue;
+    seen.add(pair);
+    links.push({ from, to, label: str(r.label, 60) || undefined, inferred: true });
+  }
+  return links;
 }
