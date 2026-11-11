@@ -11,6 +11,7 @@ import GlobalSearch from "@/components/GlobalSearch";
 const NAV = [
   { href: "/", label: "Início" },
   { href: "/disciplinas", label: "Disciplinas" },
+  { href: "/mapas", label: "Mapas" },
   { href: "/cadernos", label: "Cadernos" },
   { href: "/revisoes", label: "Revisões" },
   { href: "/avaliacoes", label: "Avaliações" },
