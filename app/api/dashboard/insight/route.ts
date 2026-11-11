@@ -5,7 +5,7 @@ import { describeAiError, logError, parseModelObject, textOf } from "@/lib/serve
 
 export const maxDuration = 60;
 
-const MODEL = "claude-sonnet-5-5";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 const MAX_BODY_BYTES = 60_000;
 const json = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } });
 const jsonError = (message: string, status: number, ref?: string) => json(ref ? { error: message, ref } : { error: message }, status);
