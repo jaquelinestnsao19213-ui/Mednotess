@@ -7,7 +7,7 @@ import { HttpError, batchNote, describeAiError, generateCards, logError, parseMo
 
 export const maxDuration = 120;
 
-const MODEL = "claude-sonnet-5-5";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 // A Vercel derruba a função em maxDuration e devolve texto puro ("An error occurred..."), que o navegador não consegue ler como JSON.
 // Por isso a IA tem um prazo interno menor: se estourar, respondemos nós mesmos, em JSON, com uma mensagem clara.
 const AI_DEADLINE_MS = Number(process.env.REVIEW_AI_DEADLINE_MS) || 110_000;
