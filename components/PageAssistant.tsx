@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { uploadFile } from "@/lib/upload";
+import { docPdfUrls } from "@/lib/doc";
 import { type AssistantCard, cardsToMarkdown, sanitizeCards } from "@/lib/cards";
 import { saveCardsToReview } from "@/lib/cards-db";
 import Markdown from "./Markdown";
@@ -351,10 +352,12 @@ export default function PageAssistant({
       while (history.length && history[0].role !== "user") history.shift();
 
       const pageText = docToText(contentRef.current).trim().slice(0, MAX_PAGE_CONTEXT);
+      // PDFs que estão dentro da página: a IA lê o conteúdo deles para criar resumos, flashcards e questões
+      const pageFiles = docPdfUrls(contentRef.current).slice(0, 12);
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ messages: history, pageContext: { title: (title ?? "").slice(0, 300), text: pageText } }),
+        body: JSON.stringify({ messages: history, pageContext: { title: (title ?? "").slice(0, 300), text: pageText }, pageFiles }),
       });
       const result = (await response.json()) as { message?: string; insertText?: string | null; cards?: unknown; error?: string };
       if (!response.ok || !result.message) throw new Error(result.error ?? "Não foi possível obter uma resposta agora.");
@@ -429,7 +432,7 @@ export default function PageAssistant({
           <span className="pa-avatar" aria-hidden="true">✦</span>
           <div className="pa-title">
             <strong>Maria · assistente da página</strong>
-            <span>{showHistory ? "Histórico de conversas desta página" : "Lê esta página, cria flashcards e questões"}</span>
+            <span>{showHistory ? "Histórico de conversas desta página" : "Lê esta página e os PDFs dela, cria flashcards e questões"}</span>
           </div>
           {historyOk && pageId && (
             <button type="button" className={`pa-icon${showHistory ? " on" : ""}`} aria-label="Histórico de conversas" aria-pressed={showHistory} title="Histórico" onClick={() => setShowHistory((v) => !v)}>
@@ -460,7 +463,7 @@ export default function PageAssistant({
               <div className="pa-empty">
                 <div className="pa-big" aria-hidden="true">✦</div>
                 <h3>Como posso ajudar nesta página?</h3>
-                <p>Pergunte sobre o conteúdo, peça um resumo ou gere flashcards e questões para guardar em Revisões.</p>
+                <p>Pergunte sobre o conteúdo, peça um resumo ou gere flashcards e questões (inclusive a partir dos PDFs da página) para guardar em Revisões.</p>
                 <div className="pa-starters">
                   {STARTERS.map((s) => (
                     <button type="button" key={s} className="pa-starter" onClick={() => void sendMessage(s)}>{s}</button>
@@ -580,7 +583,7 @@ export default function PageAssistant({
             />
             <button type="submit" className="pa-send" aria-label="Enviar mensagem" disabled={!canSend}>↑</button>
           </form>
-          <p className="pa-note">O conteúdo da página é enviado à Anthropic para gerar a resposta. PDFs anexados à página não são lidos.</p>
+          <p className="pa-note">O conteúdo da página e os PDFs dentro dela (até 3) são enviados à Anthropic para gerar a resposta.</p>
         </div>
       </section>
 
