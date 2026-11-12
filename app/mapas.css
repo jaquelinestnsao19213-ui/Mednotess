@@ -135,3 +135,25 @@
 .mm-progress-bar i { display: block; height: 100%; background: #7550a4; transition: width .4s; }
 .mm-progress small { color: var(--muted, #667085); font-size: .78rem; }
 .mm-warn-text { color: #9a6228 !important; }
+
+@media (max-width: 899px) {
+  .mm-tools {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 2px 8px;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .mm-tools::-webkit-scrollbar { display: none; }
+  .mm-tools .mm-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    line-height: 1;
+    min-height: 38px;
+    padding: 8px 14px;
+    border-radius: 999px;
+  }
+}
