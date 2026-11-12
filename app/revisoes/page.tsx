@@ -12,7 +12,8 @@ import { DIFFICULTY_LABEL, type Report, type ReportFocus, type ReviewMode, type 
 import { type CardStatus, statusOf } from "@/lib/srs";
 import { supabase } from "@/lib/supabase";
 import type { StudyCard } from "@/lib/types";
-import { uploadFile } from "@/lib/upload";
+import AttachPicker from "@/components/AttachPicker";
+import { type Attachment, toFileRef } from "@/lib/attachments";
 
 type Settings = { limit: number; minutes: number; includeUpToDate: boolean; mode: ReviewMode; source: string };
 const DEFAULTS: Settings = { limit: 20, minutes: 0, includeUpToDate: false, mode: "quiz", source: "all" };
@@ -86,12 +87,13 @@ export default function ReviewsPage() {
   const [pages, setPages] = useState<PageOption[] | null>(null);
   const [pageSearch, setPageSearch] = useState("");
   const [chosen, setChosen] = useState<string[]>([]);
-  const [pdf, setPdf] = useState<{ url: string; name: string } | null>(null);
+  const [files, setFiles] = useState<Attachment[]>([]);
+  const [genWarnings, setGenWarnings] = useState<string[]>([]);
   const [genKind, setGenKind] = useState<"question" | "flashcard">("question");
   const [genCount, setGenCount] = useState(10);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [attachBusy, setAttachBusy] = useState(false);
   const timeLimit = useRef<number | null>(null);
 
   useEffect(() => {
@@ -365,29 +367,15 @@ export default function ReviewsPage() {
     start(list, report.mode, `${report.title} (refazer erros)`);
   }
 
-  async function handlePdf(file: File | undefined) {
-    if (!file) return;
-    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) return setGenError("Envie um arquivo PDF.");
-    if (file.size > 20 * 1024 * 1024) return setGenError("O PDF passa de 20 MB.");
-    setGenError(null);
-    setUploading(true);
-    try {
-      setPdf({ url: await uploadFile(file), name: file.name });
-    } catch {
-      setGenError("Não consegui enviar o PDF agora.");
-    } finally {
-      setUploading(false);
-    }
-  }
-
   async function generate() {
-    if (generating || (!chosen.length && !pdf)) return;
+    if (generating || attachBusy || (!chosen.length && !files.length)) return;
     setGenerating(true);
     setGenError(null);
+    setGenWarnings([]);
     try {
       const result = await postJson(
         "/api/review",
-        { action: "generate", pageIds: chosen, pdfs: pdf ? [pdf] : [], kind: genKind, count: genCount },
+        { action: "generate", pageIds: chosen, files: files.map(toFileRef), kind: genKind, count: genCount },
         {
           token: await authToken(),
           validate: (data) => {
@@ -398,16 +386,18 @@ export default function ReviewsPage() {
               title: typeof data.title === "string" ? data.title : "",
               pageId: isUuid(data.pageId) ? data.pageId : null,
               sources: parseSources(data.sources),
+              warnings: (Array.isArray(data.warnings) ? data.warnings : []).filter((w): w is string => typeof w === "string"),
             };
           },
         }
       );
-      const title = result.title || pdf?.name || "Revisão";
+      const title = result.title || files[0]?.name || "Revisão";
+      setGenWarnings(result.warnings);
       const saved = await saveCardsToReview(result.cards, result.pageId, title);
       await load();
       const mode: ReviewMode = genKind === "question" ? "quiz" : "flashcards";
       if (!saved.rows.length) throw new Error("Esses itens já estavam em Revisões. Escolha outro material ou outra quantidade.");
-      const sources = result.sources.pageIds.length || result.sources.pdfs.length ? result.sources : { pageIds: chosen, pdfs: pdf ? [pdf] : [] };
+      const sources = result.sources.pageIds.length || result.sources.pdfs.length ? result.sources : { pageIds: chosen, pdfs: files.map(toFileRef) };
       start(saved.rows, mode, title, { sources, focus: null, name: defaultName(mode, title) });
     } catch (cause) {
       setGenError(cause instanceof ApiError ? errorMessage(cause) : cause instanceof Error ? cause.message : "Não foi possível gerar agora.");
@@ -419,7 +409,18 @@ export default function ReviewsPage() {
   /* ---------- telas ---------- */
 
   if (view.name === "session") {
-    return <ReviewSession cards={view.cards} mode={view.mode} timeLimitMin={timeLimit.current} onFinish={(result) => void finishSession(result, view.cards, view.mode, view.title, view.meta)} />;
+    return (
+      <>
+        {genWarnings.length > 0 && (
+          <div className="notice" role="status">
+            <b>Avisos sobre os arquivos:</b>
+            <ul>{genWarnings.map((w) => <li key={w}>{w}</li>)}</ul>
+            <button type="button" className="rv-link" onClick={() => setGenWarnings([])}>entendi</button>
+          </div>
+        )}
+        <ReviewSession cards={view.cards} mode={view.mode} timeLimitMin={timeLimit.current} onFinish={(result) => void finishSession(result, view.cards, view.mode, view.title, view.meta)} />
+      </>
+    );
   }
 
   if (view.name === "result") {
@@ -586,14 +587,19 @@ export default function ReviewsPage() {
               </div>
 
               <div>
-                <p className="rv-sub">Ou envie um PDF</p>
-                <input type="file" accept="application/pdf,.pdf" disabled={uploading} onChange={(e) => { void handlePdf(e.target.files?.[0]); e.target.value = ""; }} />
-                {uploading && <p className="muted">Enviando…</p>}
-                {pdf && <p className="rv-pdf">📄 {pdf.name} <button type="button" className="rv-link" onClick={() => setPdf(null)}>remover</button></p>}
+                <p className="rv-sub">Anexe arquivos (opcional)</p>
+                <AttachPicker
+                  items={files}
+                  setItems={setFiles}
+                  max={10}
+                  disabled={generating}
+                  onBusyChange={setAttachBusy}
+                  hint="PDF, Word, PowerPoint, Excel, texto e imagens, do aparelho ou do Google Drive. A IA usa todos em conjunto, junto com as páginas escolhidas."
+                />
               </div>
 
               {genError && <p className="notice">{genError}</p>}
-              <button type="button" className="rv-primary" disabled={generating || uploading || (!chosen.length && !pdf)} onClick={() => void generate()}>
+              <button type="button" className="rv-primary" disabled={generating || attachBusy || (!chosen.length && !files.length)} onClick={() => void generate()}>
                 {generating ? "A IA está criando… (pode levar até 1 min)" : "Gerar e começar"}
               </button>
             </div>

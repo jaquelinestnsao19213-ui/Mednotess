@@ -48,3 +48,26 @@ export function alignFromX(x: number, left: number, width: number): Align {
   const f = (x - left) / Math.max(1, width);
   return f < 1 / 3 ? "left" : f > 2 / 3 ? "right" : "center";
 }
+
+/** Posição de destino para trocar o bloco que começa em `from` com o vizinho de cima (-1) ou de baixo (1). */
+export function stepTarget(doc: PMNode, from: number, dir: -1 | 1): number | null {
+  let node: PMNode | null = null;
+  try {
+    node = doc.nodeAt(from);
+  } catch {
+    return null;
+  }
+  if (!node) return null;
+  const $from = doc.resolve(from);
+  const index = $from.index();
+  const sibling = $from.parent.maybeChild(index + dir);
+  if (!sibling) return null;
+  return dir < 0 ? from - sibling.nodeSize : from + node.nodeSize + sibling.nodeSize;
+}
+
+/** Posição inicial da tabela que contém a posição `pos` (ou null se não estiver numa tabela). */
+export function tableStartAt(doc: PMNode, pos: number): number | null {
+  const $p = doc.resolve(Math.max(0, Math.min(pos, doc.content.size)));
+  for (let d = $p.depth; d >= 1; d--) if ($p.node(d).type.name === "table") return $p.before(d);
+  return null;
+}
