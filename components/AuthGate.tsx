@@ -79,7 +79,13 @@ function LoginForm() {
   async function signUp() {
     setBusy(true);
     setMessage(null);
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    // O link de confirmação do e-mail deve voltar para o endereço do site em uso (não para localhost).
+    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || window.location.origin;
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: siteUrl },
+    });
     if (error) setMessage(error.message);
     else if (!data.session) setMessage("Conta criada. Abra o link que enviamos para o seu e-mail e volte para entrar.");
     setBusy(false);
