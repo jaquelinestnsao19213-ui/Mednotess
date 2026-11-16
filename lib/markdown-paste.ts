@@ -9,6 +9,12 @@ function inline(raw: string): string {
     codes.push(c);
     return `\u0000${codes.length - 1}\u0000`;
   });
+  // Caracteres escapados com barra (\. \* \_ ...) viram texto comum e não disparam formatação.
+  const escaped: string[] = [];
+  s = s.replace(/\\([\\`*_{}[\]()#+\-.!|>~<&])/g, (_m, c: string) => {
+    escaped.push(c);
+    return `\u0001${escaped.length - 1}\u0001`;
+  });
   s = esc(s);
   s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, '<img src="$2" alt="$1">');
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, '<a href="$2">$1</a>');
@@ -18,11 +24,12 @@ function inline(raw: string): string {
   s = s.replace(/(^|[^*\w])\*([^*\s][^*\n]*)\*(?!\w)/g, "$1<em>$2</em>");
   s = s.replace(/(^|[^_\w])_([^_\s][^_\n]*)_(?!\w)/g, "$1<em>$2</em>");
   s = s.replace(/~~([^~\n]+)~~/g, "<s>$1</s>");
+  s = s.replace(/\u0001(\d+)\u0001/g, (_m, i: string) => esc(escaped[Number(i)]));
   s = s.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => `<code>${esc(codes[Number(i)])}</code>`);
   return s;
 }
 
-const LIST_RE = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/;
+const LIST_RE = /^(\s*)([-*+]|\d{1,3}\\?[.)])\s+(.*)$/;
 const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 const HR = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const indentOf = (s: string) => s.replace(/\t/g, "    ").match(/^ */)![0].length;
@@ -186,7 +193,8 @@ export function looksLikeMarkdown(text: string): boolean {
   if (/\*\*[^*\n]+\*\*/.test(text)) return true;
   if (/^\s*\|?\s*:?-{3,}:?\s*\|[\s|:-]*$/m.test(text)) return true;
   if (count(/^\s*[-*+]\s+\S/gm) >= 2) return true;
-  if (count(/^\s*\d{1,3}[.)]\s+\S/gm) >= 2) return true;
+  if (count(/^\s*\d{1,3}\\?[.)]\s+\S/gm) >= 2) return true;
+  if (/^\s*\d{1,3}\\[.)]\s+\S/m.test(text)) return true; // "2\." = Markdown com o ponto escapado
   if (/^>\s+\S/m.test(text)) return true;
   if (/\[[^\]\n]+\]\(https?:\/\/[^\s)]+\)/.test(text)) return true;
   return false;
