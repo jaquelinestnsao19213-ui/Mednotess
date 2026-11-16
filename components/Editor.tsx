@@ -12,12 +12,12 @@ import Color from "@tiptap/extension-color";
 import Placeholder from "@tiptap/extension-placeholder";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
-import TableCell from "@tiptap/extension-table-cell";
-import TableHeader from "@tiptap/extension-table-header";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
+import { FontFamily, StyledTableCell, StyledTableHeader } from "./editor/format-extensions";
+import { FontFamilyPicker, TableFormatting } from "./editor/FormatExtras";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
 import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
@@ -27,6 +27,8 @@ import { extFromFile, mediaErrorMessage, mediaKindOf, parseVideoLink, uploadMedi
 import { Slice } from "@tiptap/pm/model";
 import { richClipboard } from "@/lib/copy-html";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
+import { cleanClipboardHTML } from "@/lib/clipboard-clean";
+import { looksLikeMarkdown, markdownToHtml } from "@/lib/markdown-paste";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
 
@@ -74,58 +76,6 @@ const SIZES: { name: string; v: string | null }[] = [
   { name: "7", v: "28px" },
   { name: "Padrão", v: null },
 ];
-
-// Keep useful formatting from external editors while dropping unsafe content and noisy styles.
-function cleanClipboardHTML(html: string): Document {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  doc.querySelectorAll("script, style, iframe, object, embed, link, meta, form, input, button, textarea, select, svg, math").forEach((el) => el.remove());
-
-  const allowedStyles = new Set([
-    "background-color",
-    "color",
-    "font-size",
-    "font-style",
-    "font-weight",
-    "text-align",
-    "text-decoration",
-    "text-decoration-line",
-  ]);
-  const safeUrl = (value: string, image: boolean) => {
-    try {
-      const url = new URL(value, doc.baseURI);
-      return (url.protocol === "http:" || url.protocol === "https:" || (!image && url.protocol === "mailto:"))
-        ? url.href
-        : "";
-    } catch {
-      return "";
-    }
-  };
-
-  doc.body.querySelectorAll("*").forEach((el) => {
-    for (const attr of Array.from(el.attributes)) {
-      const name = attr.name.toLowerCase();
-      if (name.startsWith("on") || name === "srcdoc" || name === "contenteditable") {
-        el.removeAttribute(attr.name);
-      } else if (name === "style") {
-        const style = (el as HTMLElement).style;
-        const kept: string[] = [];
-        for (const property of Array.from(style)) {
-          const value = style.getPropertyValue(property).trim();
-          if (allowedStyles.has(property) && value && !/url\s*\(|expression\s*\(/i.test(value)) {
-            kept.push(`${property}: ${value}`);
-          }
-        }
-        if (kept.length) el.setAttribute("style", kept.join("; "));
-        else el.removeAttribute("style");
-      } else if (name === "href" || name === "src") {
-        const url = safeUrl(attr.value, el.tagName.toLowerCase() === "img");
-        if (url) el.setAttribute(name, url);
-        else el.removeAttribute(name);
-      }
-    }
-  });
-  return doc;
-}
 
 export default function Editor({
   initial,
@@ -219,6 +169,7 @@ export default function Editor({
       TextStyle,
       Color,
       FontSize,
+      FontFamily,
       Highlight.configure({ multicolor: true }),
       TextAlign.configure({ types: ["heading", "paragraph"] }),
       ResizableImage,
@@ -227,8 +178,8 @@ export default function Editor({
       }),
       Table.configure({ resizable: false }),
       TableRow,
-      TableHeader,
-      TableCell,
+      StyledTableHeader,
+      StyledTableCell,
       TaskList,
       TaskItem.configure({ nested: true }),
       Callout,
@@ -286,6 +237,20 @@ export default function Editor({
 
         const doc = cleanClipboardHTML(html);
         if (!doc.body.textContent?.trim() && !doc.body.querySelector("table, img, hr")) return false;
+
+        // Alguns apps (ChatGPT, Claude) copiam o HTML "achatado" (sem negrito, títulos, listas ou tabelas),
+        // mas o texto simples vem em Markdown. Nesse caso o Markdown é que vira formatação de verdade.
+        const plain = event.clipboardData?.getData("text/plain") ?? "";
+        const hasStructure = doc.body.querySelector("table, ul, ol, h1, h2, h3, h4, h5, h6, strong, b, em, i, pre, blockquote, img, hr");
+        if (!hasStructure && looksLikeMarkdown(plain) && !view.state.selection.$from.parent.type.spec.code) {
+          const mdDoc = new window.DOMParser().parseFromString(markdownToHtml(plain), "text/html");
+          const mdSlice = PMDOMParser.fromSchema(view.state.schema).parseSlice(mdDoc.body);
+          if (mdSlice.content.size > 0) {
+            event.preventDefault();
+            view.dispatch(view.state.tr.replaceSelection(mdSlice).scrollIntoView());
+            return true;
+          }
+        }
 
         // Parse as a slice so pasted paragraphs, lists, and tables fit the current selection naturally.
         const slice = PMDOMParser.fromSchema(view.state.schema).parseSlice(doc.body, { preserveWhitespace: true });
@@ -600,6 +565,7 @@ export default function Editor({
                 {chip("Direita", () => chain().setTextAlign("right").run(), editor.isActive({ textAlign: "right" }))}
                 {chip("Justificado", () => chain().setTextAlign("justify").run(), editor.isActive({ textAlign: "justify" }))}
               </div>
+              <FontFamilyPicker editor={editor} />
               <p className="sheet-label">Tamanho da fonte</p>
               <div className="sheet-row">
                 {SIZES.map((s) =>
@@ -686,6 +652,7 @@ export default function Editor({
                     {chip("− Coluna", () => chain().deleteColumn().run())}
                     {chip("Apagar tabela", () => chain().deleteTable().run())}
                   </div>
+                  <TableFormatting editor={editor} />
                 </>
               )}
             </div>
