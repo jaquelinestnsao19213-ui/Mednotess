@@ -18,6 +18,7 @@ import { DOMParser as PMDOMParser } from "@tiptap/pm/model";
 import { Callout, FileCard, FontSize, ResizableImage, Toggle, TrailingNode, WebEmbed } from "./editor/extensions";
 import { FontFamily, StyledTableCell, StyledTableHeader } from "./editor/format-extensions";
 import { FontFamilyPicker, TableFormatting } from "./editor/FormatExtras";
+import TableGrip from "./editor/TableGrip";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
 import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
@@ -176,7 +177,7 @@ export default function Editor({
       Placeholder.configure({
         placeholder: ({ node }) => (node.type.name === "heading" ? "Título" : "Escreva aqui ou digite / para inserir blocos…"),
       }),
-      Table.configure({ resizable: false }),
+      Table.configure({ resizable: true, handleWidth: 10, cellMinWidth: 60, lastColumnResizable: true }),
       TableRow,
       StyledTableHeader,
       StyledTableCell,
@@ -511,6 +512,7 @@ export default function Editor({
 
       <MediaIndex editor={editor} />
       <EditorContent editor={editor} />
+      <TableGrip editor={editor} />
       {message && <p className="notice">{message}</p>}
       {slash && items.length > 0 && (
         <div className="slash" style={{ top: slash.top, left: slash.left }} onMouseDown={keep} role="listbox" aria-label="Inserir bloco">
