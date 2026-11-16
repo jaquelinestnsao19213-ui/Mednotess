@@ -3,6 +3,9 @@
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+// \u0002 marca uma quebra de linha dentro do parágrafo (vira <br> depois de escapar o texto).
+const BR = "\u0002";
+
 function inline(raw: string): string {
   const codes: string[] = [];
   let s = raw.replace(/`([^`]+)`/g, (_m, c: string) => {
@@ -16,6 +19,7 @@ function inline(raw: string): string {
     return `\u0001${escaped.length - 1}\u0001`;
   });
   s = esc(s);
+  s = s.replace(/\u0002/g, "<br>");
   s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, '<img src="$2" alt="$1">');
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, '<a href="$2">$1</a>');
   s = s.replace(/\*\*\*([^*\n]+)\*\*\*/g, "<strong><em>$1</em></strong>");
@@ -79,9 +83,9 @@ function blocks(lines: string[]): string {
 
       let nested = "";
       for (;;) {
-        // texto que continua o item (recuado)
+        // texto que continua o item (recuado): mantém a quebra de linha
         if (i < lines.length && lines[i].trim() && !LIST_RE.test(lines[i]) && indentOf(lines[i]) > base && !/^\s*```/.test(lines[i])) {
-          text += " " + lines[i].trim();
+          text += BR + lines[i].trim();
           i++;
           continue;
         }
@@ -174,7 +178,7 @@ function blocks(lines: string[]): string {
     const para: string[] = [line.trim()];
     i++;
     while (i < lines.length && lines[i].trim() && !startsBlock(i)) para.push(lines[i++].trim());
-    out.push(`<p>${inline(para.join(" "))}</p>`);
+    out.push(`<p>${inline(para.join(BR))}</p>`);
   }
 
   return out.join("");
