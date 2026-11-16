@@ -35,11 +35,60 @@ export function FontFamilyPicker({ editor }: { editor: Editor }) {
   );
 }
 
-// Formatação da tabela (colada ou criada): título, mesclar, alinhar e cor da célula.
+// Célula (ou cabeçalho) onde está o cursor.
+function currentCell(editor: Editor) {
+  const { $from } = editor.state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    const node = $from.node(d);
+    if (node.type.name === "tableCell" || node.type.name === "tableHeader") return { node, pos: $from.before(d) };
+  }
+  return null;
+}
+
+// Aumenta/diminui a largura da coluna onde está o cursor (funciona com toque, sem precisar arrastar).
+function changeColumnWidth(editor: Editor, delta: number) {
+  const cell = currentCell(editor);
+  if (!cell) return;
+  const span = Number(cell.node.attrs.colspan) || 1;
+  const saved = Array.isArray(cell.node.attrs.colwidth) ? (cell.node.attrs.colwidth as number[]).reduce((a, b) => a + b, 0) : 0;
+  const dom = editor.view.nodeDOM(cell.pos) as HTMLElement | null;
+  const current = saved || dom?.getBoundingClientRect().width || 120;
+  const next = Math.min(1200, Math.max(60, Math.round(current + delta)));
+  const widths = Array.from({ length: span }, () => Math.round(next / span));
+  editor.chain().focus().setCellAttribute("colwidth", widths).run();
+}
+
+// Remove as larguras fixas: a tabela volta a ocupar a largura da página, com colunas iguais.
+function fitTableToPage(editor: Editor) {
+  const { state, view } = editor;
+  const { $from } = state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    const table = $from.node(d);
+    if (table.type.name !== "table") continue;
+    const start = $from.start(d);
+    const tr = state.tr;
+    table.descendants((n, p) => {
+      if (n.type.name === "tableCell" || n.type.name === "tableHeader") {
+        tr.setNodeMarkup(start + p, undefined, { ...n.attrs, colwidth: null });
+      }
+    });
+    view.dispatch(tr);
+    editor.commands.focus();
+    return;
+  }
+}
+
+// Formatação da tabela (colada ou criada): largura das colunas, título, mesclar, alinhar e cor da célula.
 export function TableFormatting({ editor }: { editor: Editor }) {
   const chain = () => editor.chain().focus();
   return (
     <>
+      <p className="sheet-label">Largura (arraste a borda da coluna ou use os botões)</p>
+      <div className="sheet-row">
+        <button type="button" className="chip" aria-label="Diminuir coluna" onClick={() => changeColumnWidth(editor, -40)}>− Coluna mais estreita</button>
+        <button type="button" className="chip" aria-label="Aumentar coluna" onClick={() => changeColumnWidth(editor, 40)}>+ Coluna mais larga</button>
+        <button type="button" className="chip" onClick={() => fitTableToPage(editor)}>Ajustar à página</button>
+      </div>
       <div className="sheet-row">
         <button type="button" className="chip" onClick={() => chain().toggleHeaderRow().run()}>Linha de título</button>
         <button type="button" className="chip" onClick={() => chain().mergeCells().run()}>Mesclar células</button>
