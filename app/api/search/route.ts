@@ -13,6 +13,8 @@ const MAX_HITS = 20;
 const MAX_PDF_HITS = 15;
 const MAX_PDF_HITS_PER_FILE = 4;
 
+type SearchBody = { query?: unknown; pageId?: unknown };
+
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
 // Sem acento e em minúsculas, mantendo o MESMO tamanho do texto original (para achar o trecho certo).
@@ -64,20 +66,21 @@ async function expandQuery(query: string): Promise<string[] | null> {
 }
 
 type ChunkRow = { page_id: string | null; file_url: string; file_name: string; page_number: number; content: string };
+type PdfHit = { pageId: string | null; fileName: string; pageNumber: number; snippet: string; matched: string[] };
 
 // Só letras sem acento, números, espaço e hífen entram no filtro do banco (evita caracteres que quebram a consulta).
 const safeForFilter = (t: Term) => t.folded.length >= 3 && /^[a-z0-9][a-z0-9 \-]{1,58}$/.test(t.folded);
 
 // Texto dos PDFs já indexados (schema20.sql): acha as páginas dos PDFs que citam os termos.
-async function searchPdfs(db: SupabaseClient, terms: Term[], pageId: string | null) {
+async function searchPdfs(db: SupabaseClient, terms: Term[], pageId: string | null): Promise<{ indexed: number | null; hits: PdfHit[] }> {
   const total = await db.from("pdf_chunks").select("id", { count: "exact", head: true });
-  if (total.error) return { indexed: null as number | null, hits: [] };
+  if (total.error) return { indexed: null, hits: [] };
   const indexed = total.count ?? 0;
   if (!indexed) return { indexed, hits: [] };
 
   const usable = terms.filter(safeForFilter);
-  const run = async (list: Term[]) => {
-    if (!list.length) return [] as ChunkRow[];
+  const run = async (list: Term[]): Promise<ChunkRow[]> => {
+    if (!list.length) return [];
     let query = db
       .from("pdf_chunks")
       .select("page_id,file_url,file_name,page_number,content")
@@ -92,7 +95,7 @@ async function searchPdfs(db: SupabaseClient, terms: Term[], pageId: string | nu
   const rows = new Map<string, ChunkRow>();
   for (const row of [...strong, ...weak]) rows.set(`${row.file_url}#${row.page_number}`, row);
 
-  const scored = [];
+  const scored: (PdfHit & { score: number })[] = [];
   for (const row of rows.values()) {
     const text = row.content;
     const textFold = fold(text);
@@ -125,16 +128,28 @@ async function searchPdfs(db: SupabaseClient, terms: Term[], pageId: string | nu
   scored.sort((a, b) => b.score - a.score);
 
   const perFile = new Map<string, number>();
-  const hits = [];
-  for (const hit of scored) {
-    const used = perFile.get(hit.fileName) ?? 0;
+  const hits: PdfHit[] = [];
+  for (const item of scored) {
+    const used = perFile.get(item.fileName) ?? 0;
     if (used >= MAX_PDF_HITS_PER_FILE) continue;
-    perFile.set(hit.fileName, used + 1);
-    hits.push(hit);
+    perFile.set(item.fileName, used + 1);
+    hits.push({ pageId: item.pageId, fileName: item.fileName, pageNumber: item.pageNumber, snippet: item.snippet, matched: item.matched });
     if (hits.length >= MAX_PDF_HITS) break;
   }
-  return { indexed, hits: hits.map(({ score: _score, ...hit }) => hit) };
+  return { indexed, hits };
 }
+
+type PageHit = {
+  id: string;
+  title: string;
+  icon: string | null;
+  type: string;
+  typeLabel: string;
+  path: string;
+  snippet: string;
+  matched: string[];
+  pdfs: string[];
+};
 
 export async function POST(request: Request) {
   const match = (request.headers.get("authorization") ?? "").match(/^Bearer\s+([^\s]+)$/i);
@@ -153,9 +168,9 @@ export async function POST(request: Request) {
   const { data: auth, error: authError } = await db.auth.getUser(token);
   if (authError || !auth.user) return json({ error: "Sessão inválida ou expirada. Entre novamente." }, 401);
 
-  let body: { query?: unknown; pageId?: unknown } | null = null;
+  let body: SearchBody | null = null;
   try {
-    body = (await request.json()) as typeof body;
+    body = (await request.json()) as SearchBody;
   } catch {
     return json({ error: "Formato de solicitação inválido." }, 400);
   }
@@ -191,7 +206,7 @@ export async function POST(request: Request) {
   const tree: TreePage[] = rows.map((r) => ({ id: r.id, title: r.title, icon: r.icon, type: r.type, parent_id: r.parent_id }));
 
   // 3) pontua cada página pelos termos encontrados (título vale mais; achar vários termos diferentes vale mais)
-  const hits = [];
+  const scored: (PageHit & { score: number })[] = [];
   for (const row of rows) {
     const text = docToText(row.content).replace(/[ \t]+/g, " ");
     const pdfs = docPdfUrls(row.content).map((p) => p.name);
@@ -223,7 +238,7 @@ export async function POST(request: Request) {
       snippet = `${from > 0 ? "…" : ""}${text.slice(from, to).replace(/\s*\n+\s*/g, " ").trim()}${to < text.length ? "…" : ""}`;
     }
 
-    hits.push({
+    scored.push({
       score,
       id: row.id,
       title: row.title || "Sem título",
@@ -236,13 +251,24 @@ export async function POST(request: Request) {
       pdfs: pdfs.slice(0, 3),
     });
   }
-  hits.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => b.score - a.score);
+  const hits: PageHit[] = scored.slice(0, MAX_HITS).map((item) => ({
+    id: item.id,
+    title: item.title,
+    icon: item.icon,
+    type: item.type,
+    typeLabel: item.typeLabel,
+    path: item.path,
+    snippet: item.snippet,
+    matched: item.matched,
+    pdfs: item.pdfs,
+  }));
 
   return json({
     expanded: related !== null,
     terms: terms.map((t) => t.raw).slice(0, 30),
     scanned: rows.length,
-    hits: hits.slice(0, MAX_HITS).map(({ score: _score, ...hit }) => hit),
+    hits,
     // pdfIndexed: null = tabela ainda não criada (schema20.sql); 0 = nenhum PDF indexado ainda
     pdfIndexed: pdfResult.indexed,
     pdfHits: pdfResult.hits,
