@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { docPdfUrls, docToText } from "@/lib/doc";
 import { pathLabel, TYPE_LABEL, type TreePage } from "@/lib/page-tree";
 import type { PageRow } from "@/lib/types";
@@ -10,6 +10,8 @@ export const maxDuration = 60;
 const MODEL = process.env.SEARCH_MODEL || process.env.CHAT_MODEL || process.env.ANTHROPIC_MODEL || "claude-haiku-5-5";
 const MAX_PAGES = 2000; // páginas mais recentes que entram na busca
 const MAX_HITS = 20;
+const MAX_PDF_HITS = 15;
+const MAX_PDF_HITS_PER_FILE = 4;
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
@@ -61,6 +63,79 @@ async function expandQuery(query: string): Promise<string[] | null> {
   }
 }
 
+type ChunkRow = { page_id: string | null; file_url: string; file_name: string; page_number: number; content: string };
+
+// Só letras sem acento, números, espaço e hífen entram no filtro do banco (evita caracteres que quebram a consulta).
+const safeForFilter = (t: Term) => t.folded.length >= 3 && /^[a-z0-9][a-z0-9 \-]{1,58}$/.test(t.folded);
+
+// Texto dos PDFs já indexados (schema20.sql): acha as páginas dos PDFs que citam os termos.
+async function searchPdfs(db: SupabaseClient, terms: Term[], pageId: string | null) {
+  const total = await db.from("pdf_chunks").select("id", { count: "exact", head: true });
+  if (total.error) return { indexed: null as number | null, hits: [] };
+  const indexed = total.count ?? 0;
+  if (!indexed) return { indexed, hits: [] };
+
+  const usable = terms.filter(safeForFilter);
+  const run = async (list: Term[]) => {
+    if (!list.length) return [] as ChunkRow[];
+    let query = db
+      .from("pdf_chunks")
+      .select("page_id,file_url,file_name,page_number,content")
+      .or(list.map((t) => `content_fold.ilike.%${t.folded}%`).join(","))
+      .limit(300);
+    if (pageId) query = query.eq("page_id", pageId);
+    const { data } = await query;
+    return (data ?? []) as ChunkRow[];
+  };
+  // dois grupos, para os termos que ela digitou não serem engolidos pelos relacionados
+  const [strong, weak] = await Promise.all([run(usable.filter((t) => t.weight > 1).slice(0, 8)), run(usable.filter((t) => t.weight <= 1).slice(0, 16))]);
+  const rows = new Map<string, ChunkRow>();
+  for (const row of [...strong, ...weak]) rows.set(`${row.file_url}#${row.page_number}`, row);
+
+  const scored = [];
+  for (const row of rows.values()) {
+    const text = row.content;
+    const textFold = fold(text);
+    let score = 0;
+    let distinct = 0;
+    const matched: Term[] = [];
+    for (const term of terms) {
+      let count = 0;
+      for (let at = textFold.indexOf(term.folded); at >= 0 && count < 6; at = textFold.indexOf(term.folded, at + term.folded.length)) count++;
+      if (!count) continue;
+      distinct++;
+      matched.push(term);
+      score += term.weight * Math.min(count, 5);
+    }
+    if (!distinct) continue;
+    score += distinct * 2;
+    const best = [...matched].sort((a, b) => b.weight - a.weight)[0];
+    const at = textFold.indexOf(best.folded);
+    const from = Math.max(0, at - 120);
+    const to = Math.min(text.length, at + best.folded.length + 220);
+    scored.push({
+      score,
+      pageId: row.page_id,
+      fileName: row.file_name,
+      pageNumber: row.page_number,
+      snippet: `${from > 0 ? "…" : ""}${text.slice(from, to).trim()}${to < text.length ? "…" : ""}`,
+      matched: matched.slice(0, 6).map((t) => t.raw),
+    });
+  }
+  scored.sort((a, b) => b.score - a.score);
+
+  const perFile = new Map<string, number>();
+  const hits = [];
+  for (const hit of scored) {
+    const used = perFile.get(hit.fileName) ?? 0;
+    if (used >= MAX_PDF_HITS_PER_FILE) continue;
+    perFile.set(hit.fileName, used + 1);
+    hits.push(hit);
+    if (hits.length >= MAX_PDF_HITS) break;
+  }
+  return { indexed, hits: hits.map(({ score: _score, ...hit }) => hit) };
+}
+
 export async function POST(request: Request) {
   const match = (request.headers.get("authorization") ?? "").match(/^Bearer\s+([^\s]+)$/i);
   if (!match) return json({ error: "Faça login para buscar." }, 401);
@@ -102,11 +177,14 @@ export async function POST(request: Request) {
   for (const word of query.split(" ")) if (word.length >= 4 || /^[A-Z0-9]{2,}$/.test(word)) add(word, 2.5);
   for (const term of related ?? []) add(term, 1);
 
-  // 2) páginas da usuária (ou só a página atual, na busca contextual)
+  // 2) páginas da usuária (ou só a página atual, na busca contextual) e, em paralelo, o texto dos PDFs indexados
   const select = "id,parent_id,type,title,icon,content,updated_at";
-  const result = pageId
-    ? await db.from("pages").select(select).eq("id", pageId).limit(1)
-    : await db.from("pages").select(select).order("updated_at", { ascending: false }).limit(MAX_PAGES);
+  const [result, pdfResult] = await Promise.all([
+    pageId
+      ? db.from("pages").select(select).eq("id", pageId).limit(1)
+      : db.from("pages").select(select).order("updated_at", { ascending: false }).limit(MAX_PAGES),
+    searchPdfs(db, terms, pageId),
+  ]);
   if (result.error) return json({ error: "Não foi possível ler as páginas agora. Tente de novo." }, 502);
   const rows = (result.data ?? []) as Pick<PageRow, "id" | "parent_id" | "type" | "title" | "icon" | "content">[];
 
@@ -165,5 +243,8 @@ export async function POST(request: Request) {
     terms: terms.map((t) => t.raw).slice(0, 30),
     scanned: rows.length,
     hits: hits.slice(0, MAX_HITS).map(({ score: _score, ...hit }) => hit),
+    // pdfIndexed: null = tabela ainda não criada (schema20.sql); 0 = nenhum PDF indexado ainda
+    pdfIndexed: pdfResult.indexed,
+    pdfHits: pdfResult.hits,
   });
 }
