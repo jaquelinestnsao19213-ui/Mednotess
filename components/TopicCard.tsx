@@ -18,15 +18,13 @@ type Props = {
   drop: DropZone | null;
   canUp: boolean;
   canDown: boolean;
-  canNest: boolean;
   onHead: () => void;
   onToggle: () => void;
   onImport: () => void;
-  onAddSub: () => void;
+  onNewPage: () => void;
   onRename: () => void;
   onUp: () => void;
   onDown: () => void;
-  onNest: () => void;
   onUnnest: () => void;
   onDelete: () => void;
   onUnlink: (pageId: string) => void;
@@ -36,7 +34,7 @@ type Props = {
 
 const iconOf = (p: PageItem) => p.icon || (p.type === "notebook" ? "📓" : p.type === "lesson" ? "📚" : "📄");
 
-/** Cartão de um assunto: abre o conteúdo, expande para ver páginas e subassuntos, tem menu e alça para arrastar. */
+/** Cartão de um assunto: o toque abre (ou cria) a página para escrever; a seta expande; o menu tem as outras ações. */
 export default function TopicCard(p: Props) {
   const [menu, setMenu] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
@@ -58,9 +56,9 @@ export default function TopicCard(p: Props) {
   return (
     <li className={`topic-card${p.isChild ? " is-child" : ""}${p.dragging ? " dragging" : ""}`} data-topic-card={p.id}>
       <div className="tc-head" data-topic-head={p.id} data-drop={p.drop ?? undefined}>
-        <span className="tc-grip" role="button" aria-label={`Arrastar ${p.name}`} title="Arrastar para reordenar ou colocar dentro de outro assunto" onPointerDown={p.onGrip}>⠿</span>
+        <span className="tc-grip" role="button" aria-label={`Arrastar ${p.name}`} title="Arrastar para reordenar" onPointerDown={p.onGrip}>⠿</span>
         <button type="button" className="tc-main" onClick={p.onHead}>
-          <span className="tc-icon" aria-hidden="true">{p.expanded ? "📂" : "📁"}</span>
+          <span className="tc-icon" aria-hidden="true">{p.pages.length === 0 && !p.children ? "📝" : p.expanded ? "📂" : "📁"}</span>
           <span className="tc-text"><strong>{p.name}</strong><small>{p.subtitle}</small></span>
         </button>
         <button type="button" className="tc-chev" aria-expanded={p.expanded} aria-label={`${p.expanded ? "Recolher" : "Expandir"} ${p.name}`} onClick={p.onToggle}>{p.expanded ? "⌃" : "⌄"}</button>
@@ -68,10 +66,11 @@ export default function TopicCard(p: Props) {
           <button type="button" className="tc-more" aria-label={`Mais ações para ${p.name}`} aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu((v) => !v)}>⋯</button>
           {menu && (
             <div className="tc-menu" role="menu">
+              <button type="button" role="menuitem" onClick={act(p.onNewPage)}>Nova página para escrever</button>
+              <button type="button" role="menuitem" onClick={act(p.onImport)}>Importar página</button>
               <button type="button" role="menuitem" onClick={act(p.onRename)}>Renomear</button>
               <button type="button" role="menuitem" disabled={!p.canUp} onClick={act(p.onUp)}>Subir</button>
               <button type="button" role="menuitem" disabled={!p.canDown} onClick={act(p.onDown)}>Descer</button>
-              {!p.isChild && p.canNest && <button type="button" role="menuitem" onClick={act(p.onNest)}>Tornar subassunto de…</button>}
               {p.isChild && <button type="button" role="menuitem" onClick={act(p.onUnnest)}>Tirar de dentro</button>}
               <button type="button" role="menuitem" className="danger" onClick={act(p.onDelete)}>Excluir assunto</button>
             </div>
@@ -96,8 +95,8 @@ export default function TopicCard(p: Props) {
             </ul>
           )}
           <div className="tc-actions">
+            <button type="button" className="secondary small" onClick={p.onNewPage}>＋ Nova página</button>
             <button type="button" className="secondary small" onClick={p.onImport}>＋ Importar página</button>
-            {!p.isChild && <button type="button" className="secondary small" onClick={p.onAddSub}>＋ Subassunto</button>}
           </div>
           {p.children && <ul className="tc-subs">{p.children}</ul>}
         </div>

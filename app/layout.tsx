@@ -7,6 +7,7 @@ import "./home-chat.css";
 import "./media.css";
 import "./attach-picker.css";
 import "./tables.css";
+import "./topics.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",

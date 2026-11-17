@@ -1,0 +1,35 @@
+/* Tela da disciplina: assuntos como cartões que abrem direto a página para escrever */
+.subpages > h2 { font-size: 1.25rem; margin-bottom: 10px; }
+
+/* campo "Novo assunto" como uma barra única */
+.topic-add { align-items: center; gap: 6px; margin: 0 0 16px; padding: 5px 5px 5px 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.topic-add input { border: 0; background: transparent; padding: 10px 4px; }
+.topic-add input:focus-visible { outline: none; }
+.topic-add:focus-within { border-color: var(--c, var(--accent)); }
+.topic-add .secondary { border: 0; border-radius: 10px; background: var(--c, var(--accent)); color: #fff; font-weight: 600; }
+.topic-add .secondary:disabled { background: var(--line); color: var(--muted); opacity: 1; }
+
+/* cartões */
+.topics.topic-tree { gap: 10px; }
+.topic-tree .topic-card { position: relative; border-radius: 14px; box-shadow: 0 1px 2px rgb(27 36 48 / .05); }
+.topic-tree .topic-card::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 4px; border-radius: 0 4px 4px 0; background: var(--c, var(--accent)); }
+.topic-tree .topic-card.is-child::before { background: color-mix(in srgb, var(--c, var(--accent)) 55%, var(--line)); }
+.topic-tree .tc-head { padding: 4px 4px 4px 8px; }
+.topic-tree .tc-grip { width: 22px; opacity: .45; }
+.topic-tree .tc-main { border-radius: 10px; min-height: 56px; }
+.topic-tree .tc-main:hover { background: color-mix(in srgb, var(--c, var(--accent)) 7%, var(--surface)); }
+.topic-tree .tc-main:active { background: color-mix(in srgb, var(--c, var(--accent)) 13%, var(--surface)); }
+.topic-tree .tc-icon { display: grid; place-items: center; flex: 0 0 auto; width: 40px; height: 40px; border-radius: 11px; background: color-mix(in srgb, var(--c, var(--accent)) 14%, var(--surface)); font-size: 1.25rem; }
+.topic-tree .tc-text strong { font-size: 1.04rem; font-weight: 600; line-height: 1.25; }
+.topic-tree .tc-text small { font-size: .8rem; margin-top: 1px; }
+.topic-tree .tc-chev, .topic-tree .tc-more { color: var(--muted); }
+.topic-tree .tc-chev:hover, .topic-tree .tc-more:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.topic-tree .tc-body { padding: 0 12px 12px 16px; }
+.topic-tree .tc-pages { padding: 4px; }
+.topic-tree .tc-actions .secondary.small { flex: 1 1 140px; border-style: dashed; padding: 9px 12px; }
+.topic-tree .tc-actions .secondary.small:first-child { border-style: solid; border-color: color-mix(in srgb, var(--c, var(--accent)) 45%, var(--line)); color: var(--c, var(--accent)); font-weight: 600; }
+
+/* importar de outro caderno e excluir disciplina: discretos, no fim da tela */
+.topic-import { margin-top: 14px; }
+.topic-import .secondary { width: 100%; border-style: dashed; color: var(--muted); padding: 12px; }
+.danger { margin-top: 28px; font-size: .88rem; padding: 8px 12px; }

@@ -13,7 +13,7 @@ import { loadTreePages, movePage } from "@/lib/page-ops";
 import { pathLabel, type TreePage } from "@/lib/page-tree";
 import TopicCard, { type PageItem } from "@/components/TopicCard";
 import TopicParentPicker from "@/components/TopicParentPicker";
-import { applyDrop, canNest, childrenOf, cleanParents, diffTopics, dropZone, moveTopic, nestTargets, shiftTopic, unnestTopic, type DropZone } from "@/lib/topic-tree";
+import { applyDrop, childrenOf, cleanParents, diffTopics, dropZone, moveTopic, nestTargets, shiftTopic, unnestTopic, type DropZone } from "@/lib/topic-tree";
 import { countLabel, topicPageIds, transferCheck, type ImportMode } from "@/lib/topic-links";
 
 type RootPage = { id: string; title: string };
@@ -43,6 +43,7 @@ function SubjectView({ id }: { id: string }) {
   const [drag, setDrag] = useState<null | { id: string; target: string | null; zone: DropZone | null }>(null);
   const topicsRef = useRef<Topic[]>([]);
   topicsRef.current = topics;
+  const creatingPage = useRef(false);
 
   async function load() {
     const { data: s } = await supabase.from("subjects").select("*").eq("id", id).maybeSingle();
@@ -116,20 +117,6 @@ function SubjectView({ id }: { id: string }) {
     if (name !== null) renameTopic(t, name);
   }
 
-  async function addSubtopic(parent: Topic) {
-    const name = window.prompt(`Nome do subassunto de "${parent.name}":`)?.trim();
-    if (!name) return;
-    setError(null);
-    const { data, error } = await supabase
-      .from("topics")
-      .insert({ subject_id: id, name, position: childrenOf(topics, parent.id).length, parent_id: parent.id })
-      .select("*")
-      .single();
-    if (error || !data) return setError("Não foi possível criar o subassunto. Confira se o schema16.sql foi executado no Supabase.");
-    setTopics((l) => [...l, data as Topic]);
-    setExpanded((s) => new Set(s).add(parent.id));
-  }
-
   // Grava só o que mudou. Se algo falhar, recarrega a tela para não mostrar uma ordem que não foi salva.
   async function persistMove(next: Topic[] | null) {
     if (!next) return;
@@ -138,7 +125,7 @@ function SubjectView({ id }: { id: string }) {
     setTopics(next);
     const results = await Promise.all(changes.map((c) => supabase.from("topics").update(c.patch).eq("id", c.id)));
     if (results.some((r) => r.error)) {
-      setError("Não foi possível salvar a nova organização. Se usou subassuntos, confirme que o schema16.sql foi executado.");
+      setError("Não foi possível salvar a nova organização.");
       await load();
     }
   }
@@ -275,17 +262,39 @@ function SubjectView({ id }: { id: string }) {
     }
   }
 
-  // Cria, dentro do caderno da disciplina, uma página de aula (com o molde de sempre) para este assunto.
+  // Cria uma página de aula (com o molde de sempre) para este assunto, dentro do caderno da disciplina, e já abre para escrever.
+  // Se a disciplina ainda não tem caderno, cria o caderno antes. Se o assunto já tem página, a nova entra junto das outras.
   async function createTopicPage(t: Topic) {
-    if (!subject?.notebook_page_id) return;
-    const { data, error } = await supabase
-      .from("pages")
-      .insert({ title: t.name, type: "lesson", parent_id: subject.notebook_page_id, content: LESSON_TEMPLATE })
-      .select("id")
-      .single();
-    if (error || !data) return setError("Não foi possível criar a página do assunto.");
-    await supabase.from("topics").update({ page_id: data.id }).eq("id", t.id);
-    router.push(`/p/${data.id}`);
+    if (!subject || creatingPage.current) return;
+    creatingPage.current = true;
+    setError(null);
+    try {
+      let notebookId = subject.notebook_page_id;
+      if (!notebookId) {
+        const { data: nb, error: nbError } = await supabase
+          .from("pages")
+          .insert({ title: subject.name, type: "notebook", parent_id: null, icon: subject.icon })
+          .select("id")
+          .single();
+        if (nbError || !nb) return setError("Não foi possível criar o caderno da disciplina.");
+        notebookId = nb.id as string;
+        await updateSubject({ notebook_page_id: notebookId });
+      }
+      const { data, error } = await supabase
+        .from("pages")
+        .insert({ title: t.name, type: "lesson", parent_id: notebookId, content: LESSON_TEMPLATE })
+        .select("id")
+        .single();
+      if (error || !data) return setError("Não foi possível criar a página do assunto.");
+      if (!t.page_id) {
+        await supabase.from("topics").update({ page_id: data.id }).eq("id", t.id);
+      } else {
+        await supabase.from("topic_pages").insert({ topic_id: t.id, page_id: data.id, position: linksOf(t).length });
+      }
+      router.push(`/p/${data.id}`);
+    } finally {
+      creatingPage.current = false;
+    }
   }
 
   async function removeSubject() {
@@ -312,7 +321,10 @@ function SubjectView({ id }: { id: string }) {
     });
     const sibs = childrenOf(topics, t.parent_id ?? null);
     const idx = sibs.findIndex((x) => x.id === t.id);
-    const subtitle = [countLabel(ids.length), subs.length ? `${subs.length} ${subs.length === 1 ? "subassunto" : "subassuntos"}` : ""].filter(Boolean).join(" · ");
+    const empty = ids.length === 0 && subs.length === 0;
+    const subtitle = empty
+      ? "Toque para começar a escrever"
+      : [countLabel(ids.length), subs.length ? `${subs.length} ${subs.length === 1 ? "subassunto" : "subassuntos"}` : ""].filter(Boolean).join(" · ");
     const open = expanded.has(t.id);
     return (
       <TopicCard
@@ -327,16 +339,18 @@ function SubjectView({ id }: { id: string }) {
         drop={drag && drag.target === t.id ? drag.zone : null}
         canUp={idx > 0}
         canDown={idx >= 0 && idx < sibs.length - 1}
-        canNest={nestTargets(topics, t.id).length > 0}
-        // um conteúdo só e nenhum subassunto: toque abre direto no caderno; senão, abre/fecha o assunto
-        onHead={() => (ids.length === 1 && subs.length === 0 ? router.push(`/p/${ids[0]}`) : toggle(t.id))}
+        // assunto vazio: toque cria a página e abre para escrever; uma página só: abre direto; várias: abre/fecha a lista
+        onHead={() => {
+          if (empty) void createTopicPage(t);
+          else if (ids.length === 1 && subs.length === 0) router.push(`/p/${ids[0]}`);
+          else toggle(t.id);
+        }}
         onToggle={() => toggle(t.id)}
         onImport={() => setPicking({ topicId: t.id })}
-        onAddSub={() => addSubtopic(t)}
+        onNewPage={() => createTopicPage(t)}
         onRename={() => askRename(t)}
         onUp={() => persistMove(shiftTopic(topics, t.id, -1))}
         onDown={() => persistMove(shiftTopic(topics, t.id, 1))}
-        onNest={() => setNesting(t)}
         onUnnest={() => persistMove(unnestTopic(topics, t.id))}
         onDelete={() => removeTopic(t)}
         onUnlink={(pid) => unlink(t, pid)}
