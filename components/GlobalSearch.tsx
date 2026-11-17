@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { supabase } from "@/lib/supabase";
+import { indexPdf, indexedUrls, isMissingTable, listAttachedPdfs } from "@/lib/pdf-index";
 
 type Hit = { kind: "caderno" | "flashcard" | "question"; id: string; page_id: string | null; title: string; snippet: string | null };
 type Smart = {
@@ -15,7 +16,8 @@ type Smart = {
   matched: string[];
   pdfs: string[];
 };
-type SmartResult = { expanded: boolean; terms: string[]; scanned: number; hits: Smart[] };
+type PdfHit = { pageId: string | null; fileName: string; pageNumber: number; snippet: string; matched: string[] };
+type SmartResult = { expanded: boolean; terms: string[]; scanned: number; hits: Smart[]; pdfIndexed: number | null; pdfHits: PdfHit[] };
 type Tab = "todos" | Hit["kind"] | "inteligente";
 
 const GROUPS: { kind: Hit["kind"]; label: string }[] = [
@@ -89,6 +91,8 @@ export default function GlobalSearch() {
   const [smartFor, setSmartFor] = useState("");
   const [smartLoading, setSmartLoading] = useState(false);
   const [smartError, setSmartError] = useState<string | null>(null);
+  const [indexing, setIndexing] = useState(false);
+  const [indexMsg, setIndexMsg] = useState("");
   const box = useRef<HTMLDivElement>(null);
   const term = q.trim();
 
@@ -139,6 +143,50 @@ export default function GlobalSearch() {
     }
   }
 
+  // Lê o texto dos PDFs anexados (um por vez, no próprio aparelho) e guarda página por página para a busca.
+  async function runIndex() {
+    if (indexing) return;
+    setIndexing(true);
+    try {
+      setIndexMsg("Procurando PDFs nas suas páginas…");
+      const all = await listAttachedPdfs();
+      if (!all.length) { setIndexMsg("Nenhum PDF anexado nas suas páginas."); return; }
+      const done = await indexedUrls();
+      const todo = all.filter((p) => !done.has(p.url));
+      if (!todo.length) { setIndexMsg(`Os ${all.length} PDFs já estão indexados.`); return; }
+
+      let ok = 0;
+      const failed: string[] = [];
+      const noText: string[] = [];
+      for (let i = 0; i < todo.length; i++) {
+        const pdf = todo[i];
+        try {
+          const result = await indexPdf(pdf, (page, total) => setIndexMsg(`Indexando ${i + 1}/${todo.length}: ${pdf.name} (p. ${page}/${total})`));
+          if (result.withText === 0) noText.push(pdf.name);
+          else ok++;
+        } catch (cause) {
+          if (isMissingTable(cause as { code?: string; message?: string })) throw cause;
+          failed.push(pdf.name);
+        }
+      }
+      const parts = [`${ok} PDF${ok === 1 ? "" : "s"} indexado${ok === 1 ? "" : "s"}.`];
+      if (noText.length) parts.push(`Sem texto (escaneado, só imagem): ${noText.join(", ")}.`);
+      if (failed.length) parts.push(`Não consegui ler: ${failed.join(", ")}.`);
+      setIndexMsg(parts.join(" "));
+      if (term.length >= 2) void runSmart();
+    } catch (cause) {
+      setIndexMsg(
+        isMissingTable(cause as { code?: string; message?: string })
+          ? "Falta criar a tabela: rode o schema20.sql no Supabase e tente de novo."
+          : cause instanceof Error && cause.message
+            ? cause.message
+            : "Não foi possível indexar agora. Tente de novo."
+      );
+    } finally {
+      setIndexing(false);
+    }
+  }
+
   const count = (k: Hit["kind"]) => hits.filter((h) => h.kind === k).length;
   const smartStale = !!smart && smartFor !== term;
 
@@ -169,7 +217,7 @@ export default function GlobalSearch() {
 
           {tab === "inteligente" ? (
             <>
-              {smartLoading && <p className="gs-empty">Procurando assuntos relacionados em todas as suas páginas…</p>}
+              {smartLoading && <p className="gs-empty">Procurando assuntos relacionados em suas páginas e PDFs…</p>}
               {!smartLoading && smartError && <p className="gs-empty">{smartError}</p>}
               {!smartLoading && !smartError && smart && (
                 <>
@@ -183,19 +231,42 @@ export default function GlobalSearch() {
                     {smart.terms.slice(0, 12).join(", ")}
                     {smart.terms.length > 12 ? "…" : ""}
                   </p>
-                  {smart.hits.length === 0 && <p className="gs-empty">Nada encontrado nas suas páginas ({smart.scanned} verificadas).</p>}
-                  {smart.hits.map((h) => (
-                    <Link key={h.id} href={`/p/${h.id}`} className="gs-item" onClick={() => setOpen(false)}>
-                      <span>{h.icon ? `${h.icon} ` : ""}{h.title}</span>
-                      <small className="gs-path">{h.typeLabel}{h.path ? ` · ${h.path}` : ""}</small>
-                      {h.snippet && <small className="gs-snip">{markTerms(h.snippet, h.matched)}</small>}
-                      {h.pdfs.length > 0 && <small className="gs-path">PDF: {h.pdfs.join(", ")}</small>}
-                      <small className="gs-why">Encontrado: {h.matched.join(", ")}</small>
-                    </Link>
-                  ))}
+
+                  <section>
+                    <h4>Anotações e páginas</h4>
+                    {smart.hits.length === 0 && <p className="gs-empty">Nada encontrado nas suas páginas ({smart.scanned} verificadas).</p>}
+                    {smart.hits.map((h) => (
+                      <Link key={h.id} href={`/p/${h.id}`} className="gs-item" onClick={() => setOpen(false)}>
+                        <span>{h.icon ? `${h.icon} ` : ""}{h.title}</span>
+                        <small className="gs-path">{h.typeLabel}{h.path ? ` · ${h.path}` : ""}</small>
+                        {h.snippet && <small className="gs-snip">{markTerms(h.snippet, h.matched)}</small>}
+                        {h.pdfs.length > 0 && <small className="gs-path">PDF: {h.pdfs.join(", ")}</small>}
+                        <small className="gs-why">Encontrado: {h.matched.join(", ")}</small>
+                      </Link>
+                    ))}
+                  </section>
+
+                  <section>
+                    <h4>Dentro dos PDFs</h4>
+                    {smart.pdfIndexed === null && <p className="gs-empty">Para buscar dentro dos PDFs, rode o schema20.sql no Supabase e toque em “Indexar PDFs” abaixo.</p>}
+                    {smart.pdfIndexed === 0 && <p className="gs-empty">Nenhum PDF indexado ainda. Toque em “Indexar PDFs” abaixo.</p>}
+                    {!!smart.pdfIndexed && smart.pdfHits.length === 0 && <p className="gs-empty">Nada encontrado nos PDFs indexados ({smart.pdfIndexed} páginas).</p>}
+                    {smart.pdfHits.map((h, i) => (
+                      <Link key={`${h.fileName}-${h.pageNumber}-${i}`} href={h.pageId ? `/p/${h.pageId}` : "/"} className="gs-item" onClick={() => setOpen(false)}>
+                        <span>{h.fileName} · p. {h.pageNumber}</span>
+                        <small className="gs-snip">{markTerms(h.snippet, h.matched)}</small>
+                        <small className="gs-why">Encontrado: {h.matched.join(", ")}</small>
+                      </Link>
+                    ))}
+                  </section>
                 </>
               )}
               {!smartLoading && !smartError && !smart && <p className="gs-empty">Toque em ✨ Inteligente ou aperte Enter para buscar assuntos relacionados, mesmo sem as palavras exatas.</p>}
+
+              <div className="gs-index">
+                <button type="button" className="gs-link" disabled={indexing} onClick={() => void runIndex()}>{indexing ? "Indexando…" : "📄 Indexar PDFs"}</button>
+                {indexMsg && <small>{indexMsg}</small>}
+              </div>
             </>
           ) : (
             <>
@@ -250,6 +321,9 @@ export default function GlobalSearch() {
         .gs-empty{margin:0;padding:14px 10px;color:var(--muted)}
         .gs-note{margin:0;padding:8px 10px 2px;color:var(--muted);font-size:.82rem}
         .gs-link{border:0;background:none;padding:0;color:var(--accent);font:inherit;text-decoration:underline;cursor:pointer}
+        .gs-link:disabled{opacity:.6;cursor:default;text-decoration:none}
+        .gs-index{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:10px 10px 4px;border-top:1px solid var(--line)}
+        .gs-index small{color:var(--muted);font-size:.8rem}
       `}</style>
     </div>
   );
