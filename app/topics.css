@@ -29,6 +29,19 @@
 .topic-tree .tc-actions .secondary.small { flex: 1 1 140px; border-style: dashed; padding: 9px 12px; }
 .topic-tree .tc-actions .secondary.small:first-child { border-style: solid; border-color: color-mix(in srgb, var(--c, var(--accent)) 45%, var(--line)); color: var(--c, var(--accent)); font-weight: 600; }
 
+/* linha do assunto: o texto ocupa o espaço e a seta e o menu (⋯) ficam alinhados à direita */
+.topic-tree .tc-head { display: flex; align-items: center; gap: 2px; }
+.topic-tree .tc-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 12px; text-align: left; }
+.topic-tree .tc-text { min-width: 0; display: flex; flex-direction: column; }
+.topic-tree .tc-chev, .topic-tree .tc-more { flex: 0 0 auto; display: grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 0; border-radius: 50%; background: transparent; font-size: 0; line-height: 0; cursor: pointer; }
+/* seta: aponta para a direita e gira para baixo quando o assunto está aberto */
+.topic-tree .tc-chev::before { content: ""; width: 8px; height: 8px; border-top: 2px solid currentColor; border-right: 2px solid currentColor; border-radius: 1px; transform: rotate(45deg); transition: transform .18s ease; }
+.topic-tree .tc-chev[aria-expanded="true"]::before { transform: rotate(135deg); }
+/* três pontinhos na horizontal */
+.topic-tree .tc-more::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; box-shadow: -7px 0 0 currentColor, 7px 0 0 currentColor; }
+.topic-tree .tc-menu-wrap { position: relative; flex: 0 0 auto; }
+.topic-tree .tc-menu { right: 0; left: auto; z-index: 30; }
+
 /* importar de outro caderno e excluir disciplina: discretos, no fim da tela */
 .topic-import { margin-top: 14px; }
 .topic-import .secondary { width: 100%; border-style: dashed; color: var(--muted); padding: 12px; }
