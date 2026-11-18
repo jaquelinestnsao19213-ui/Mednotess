@@ -30,15 +30,57 @@ function smoothOf(value: unknown): number {
   return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0.35;
 }
 
+// Pedido de inserção de texto vindo da camada de escrita (escrita convertida em texto digitado).
+type InkTextDetail = { lines: string[]; fontFamily: string | null; left?: number; top?: number };
+export const INK_TEXT_EVENT = "mednotes-ink-text";
+
 // Bloco de caneta: uma área para escrever à mão (S Pen) entre os textos da página.
 // Os traços ficam guardados no próprio documento da página (coordenadas normalizadas pela largura),
 // então não precisa mexer no Supabase e o desenho acompanha qualquer tamanho de tela.
+// Esta extensão também recebe o texto reconhecido pela camada de escrita e o insere na página.
 export const InkBlock = Node.create({
   name: "inkBlock",
   group: "block",
   atom: true,
   selectable: true,
   draggable: false,
+  addStorage() {
+    return { handler: null as ((ev: Event) => void) | null };
+  },
+  onCreate() {
+    if (typeof window === "undefined") return;
+    const editor = this.editor;
+    const handler = (ev: Event) => {
+      const d = (ev as CustomEvent<InkTextDetail>).detail;
+      if (!d || !Array.isArray(d.lines) || editor.isDestroyed) return;
+      const lines = d.lines.filter((l) => typeof l === "string" && l.trim());
+      if (!lines.length) return;
+      const { view } = editor;
+      // Entra logo depois do bloco onde a escrita estava; se não der para achar, vai para o fim da página.
+      let pos = view.state.doc.content.size;
+      if (typeof d.left === "number" && typeof d.top === "number") {
+        const hit = view.posAtCoords({ left: d.left, top: d.top });
+        if (hit) {
+          const $p = view.state.doc.resolve(hit.pos);
+          pos = $p.depth >= 1 ? $p.after(1) : hit.pos;
+        }
+      }
+      const marks = d.fontFamily ? [{ type: "textStyle", attrs: { fontFamily: d.fontFamily } }] : undefined;
+      const content = lines.map((t) => ({
+        type: "paragraph",
+        content: [marks ? { type: "text", text: t, marks } : { type: "text", text: t }],
+      }));
+      editor.chain().insertContentAt(pos, content).run();
+    };
+    this.storage.handler = handler;
+    window.addEventListener(INK_TEXT_EVENT, handler);
+  },
+  onDestroy() {
+    if (typeof window !== "undefined" && this.storage.handler) {
+      window.removeEventListener(INK_TEXT_EVENT, this.storage.handler);
+    }
+    this.storage.handler = null;
+  },
   addAttributes() {
     return {
       items: {
