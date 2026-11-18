@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
 import { drawItem, hitItem } from "../pdf/draw";
+import { smoothItem, smoothItemCached } from "./ink-smooth";
 
 type InkTool = "pen" | "highlighter" | "eraser" | "lasso";
 type Paper = "dots" | "grid" | "ruled" | "blank";
@@ -102,6 +103,7 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
   const items: Item[] = Array.isArray(node.attrs.items) ? (node.attrs.items as Item[]) : [];
   const ratio: number = Number(node.attrs.ratio) || 0.6;
   const paper: Paper = PAPERS.includes(node.attrs.paper as Paper) ? (node.attrs.paper as Paper) : "dots";
+  const smoothAttr = typeof node.attrs.smooth === "number" ? Math.max(0, Math.min(1, node.attrs.smooth)) : 0.35;
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -112,10 +114,14 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
   const [sizeIdx, setSizeIdx] = useState(1);
   const [active, setActive] = useState(items.length === 0);
   const [selIds, setSelIds] = useState<string[]>([]);
+  const [smooth, setSmooth] = useState(smoothAttr);
+  const [enhance, setEnhance] = useState(false);
   const [, setTick] = useState(0);
 
   const itemsRef = useRef<Item[]>(items);
   const ratioRef = useRef(ratio);
+  const smoothRef = useRef(smooth);
+  smoothRef.current = smooth;
   const draftRef = useRef<InkItem | null>(null);
   const lassoRef = useRef<number[] | null>(null);
   const selRef = useRef<Set<string>>(new Set());
@@ -136,6 +142,9 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
   useEffect(() => {
     ratioRef.current = ratio;
   }, [ratio]);
+  useEffect(() => {
+    setSmooth(smoothAttr);
+  }, [smoothAttr]);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -162,8 +171,9 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, h);
-    for (const it of itemsRef.current) drawItem(ctx, it, width, width);
-    if (draftRef.current) drawItem(ctx, draftRef.current, width, width);
+    // A suavização só muda como o traço é desenhado; os pontos originais continuam guardados.
+    for (const it of itemsRef.current) drawItem(ctx, smoothItemCached(it, smooth), width, width);
+    if (draftRef.current) drawItem(ctx, smoothItem(draftRef.current, smooth), width, width);
 
     const lasso = lassoRef.current;
     if (lasso && lasso.length >= 4) {
@@ -193,7 +203,7 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
       ctx.strokeRect(x, y, w, hh);
       ctx.restore();
     }
-  }, [width, ratio]);
+  }, [width, ratio, smooth]);
 
   useEffect(() => {
     paint();
@@ -403,6 +413,11 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
 
   const nextPaper = () => updateAttributes({ paper: PAPERS[(PAPERS.indexOf(paper) + 1) % PAPERS.length] });
 
+  // Guarda a intensidade escolhida no documento (os traços originais não são alterados).
+  const commitSmooth = () => {
+    if (Math.abs(smoothRef.current - smoothAttr) > 0.001) updateAttributes({ smooth: smoothRef.current });
+  };
+
   const pickTool = (t: InkTool) => {
     setTool(t);
     if (t !== "lasso") setSelection([]);
@@ -445,6 +460,7 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
           <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
           <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
           <button type="button" aria-label="Laço: selecionar, mover e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+          <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨ Aperfeiçoar</button>
           {drawing && (
             <>
               {palette.map((c, i) => (
@@ -503,6 +519,27 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
           <button type="button" aria-label="Aumentar a altura do bloco" style={btn()} onClick={moreSpace}>+ Espaço</button>
           <button type="button" aria-label="Apagar tudo do bloco" style={btn()} onClick={clearAll}>Limpar</button>
           <button type="button" aria-label="Remover bloco de escrita" style={btn()} onClick={() => deleteNode()}>🗑</button>
+        </div>
+      )}
+      {showBar && enhance && (
+        <div role="group" aria-label="Aperfeiçar escrita" style={{ display: "flex", gap: 10, alignItems: "center", paddingBottom: 8 }}>
+          <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Mais natural</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={Math.round(smooth * 100)}
+            aria-label="Intensidade da suavização dos traços"
+            onChange={(e) => setSmooth(Number(e.target.value) / 100)}
+            onPointerUp={commitSmooth}
+            onTouchEnd={commitSmooth}
+            onKeyUp={commitSmooth}
+            onBlur={commitSmooth}
+            style={{ flex: 1, minWidth: 80 }}
+          />
+          <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Mais suave</span>
+          <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(smooth * 100)}%</b>
         </div>
       )}
       {showBar && tool === "lasso" && selIds.length > 0 && (
