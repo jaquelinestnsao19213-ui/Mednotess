@@ -8,6 +8,7 @@ import { docPdfUrls } from "@/lib/doc";
 import { type AssistantCard, cardsToMarkdown, sanitizeCards } from "@/lib/cards";
 import { saveCardsToReview } from "@/lib/cards-db";
 import Markdown from "./Markdown";
+import VoiceButton from "./VoiceButton";
 
 type FileInfo = { name: string; url: string; kind: "image" | "pdf" };
 type CardsUi = { saving?: boolean; saved?: number; skipped?: number; inserted?: boolean; error?: string };
@@ -54,6 +55,45 @@ function formatWhen(iso: string) {
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
 }
 
+/** Tira a formatação Markdown para a leitura em voz alta não dizer "asterisco", "jogo da velha" etc. */
+function speechText(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s*\|?[\s:|-]{3,}\|?\s*$/gm, " ")
+    .replace(/\|/g, ", ")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/[*_~>]+/g, "")
+    .replace(/\s*\n+\s*/g, ". ")
+    .replace(/([.!?:;,])\s*\.\s/g, "$1 ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** Quebra o texto em frases curtas: o navegador lê melhor (e não corta) trechos pequenos. */
+function splitForSpeech(text: string): string[] {
+  const sentences = text.match(/[^.!?]+[.!?]*\s*/g) ?? [text];
+  const chunks: string[] = [];
+  let current = "";
+  for (const sentence of sentences) {
+    if (current && (current + sentence).length > 220) {
+      chunks.push(current.trim());
+      current = "";
+    }
+    current += sentence;
+    while (current.length > 300) {
+      chunks.push(current.slice(0, 300).trim());
+      current = current.slice(300);
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
 const CSS = `
 .pa-root{--pa-bg:#ffffff;--pa-ink:#14202b;--pa-muted:#4a5868;--pa-line:#b9c3ce;--pa-soft:#eef2f6;--pa-user:#d6efe9;--pa-accent:#0f766e;--pa-accent-ink:#ffffff;--pa-accent-soft:#e1f4f0;--pa-danger:#b42318}
 .pa-root button:focus-visible,.pa-root a:focus-visible,.pa-root textarea:focus-visible{outline:3px solid var(--pa-accent);outline-offset:2px}
@@ -77,6 +117,9 @@ const CSS = `
 .pa-icon{display:inline-grid;place-items:center;min-width:36px;height:36px;padding:0 6px;border:1px solid transparent;border-radius:10px;background:transparent;color:var(--pa-ink);font-size:17px;cursor:pointer}
 .pa-icon:hover{background:var(--pa-soft);border-color:var(--pa-line)}
 .pa-icon.on{background:var(--pa-accent);color:var(--pa-accent-ink)}
+.pa-icon.rec{background:#dc2626;border-color:#dc2626;color:#fff;animation:pa-rec 1.2s ease-in-out infinite}
+.pa-icon:disabled{opacity:.5;cursor:default}
+@keyframes pa-rec{0%,100%{box-shadow:0 0 0 0 rgb(220 38 38 / .5)}50%{box-shadow:0 0 0 7px rgb(220 38 38 / 0)}}
 .pa-list{flex:1;min-height:0;display:flex;flex-direction:column;gap:14px;padding:14px;overflow-y:auto;overscroll-behavior:contain;background:var(--pa-bg)}
 .pa-empty{margin:auto 0;text-align:center;color:var(--pa-muted)}
 .pa-empty .pa-big{display:grid;place-items:center;width:54px;height:54px;margin:0 auto 10px;border-radius:50%;background:var(--pa-accent-soft);color:var(--pa-accent);font-size:25px}
@@ -92,6 +135,10 @@ const CSS = `
 .pa-msg.user .pa-bubble{border:1px solid var(--pa-accent);border-bottom-right-radius:5px;background:var(--pa-user);white-space:pre-wrap}
 .pa-msg.assistant .pa-bubble{border:1.5px solid var(--pa-line);border-bottom-left-radius:5px;background:var(--pa-soft)}
 .pa-msg.error .pa-bubble{border-color:var(--pa-danger);color:var(--pa-danger);background:var(--pa-bg)}
+.pa-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.pa-act{display:inline-flex;align-items:center;gap:5px;min-height:34px;padding:5px 11px;border:1.5px solid var(--pa-line);border-radius:999px;background:var(--pa-bg);color:var(--pa-ink);font-size:.8rem;font-weight:600;cursor:pointer}
+.pa-act:hover{border-color:var(--pa-accent);background:var(--pa-accent-soft)}
+.pa-act.on{border-color:var(--pa-accent);background:var(--pa-accent);color:var(--pa-accent-ink)}
 .pa-files{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .pa-file{padding:3px 9px;border:1px solid var(--pa-line);border-radius:999px;background:var(--pa-bg);font-size:.76rem;color:var(--pa-muted)}
 .pa-md>:first-child{margin-top:0}.pa-md>:last-child{margin-bottom:0}
@@ -128,6 +175,7 @@ const CSS = `
 .pa-done{margin:0;padding:0 12px 10px;color:var(--pa-ink);font-size:.82rem;line-height:1.4}
 .pa-done a{color:var(--pa-accent);font-weight:700}
 .pa-err{margin:0;padding:0 12px 10px;color:var(--pa-danger);font-size:.82rem;font-weight:600}
+.pa-notice{margin:0 2px 8px;padding:8px 10px;border:1px solid var(--pa-danger);border-radius:10px;color:var(--pa-danger);font-size:.8rem;font-weight:600;line-height:1.35}
 .pa-typing{display:inline-flex;gap:5px;align-items:center;padding:12px 14px;border:1.5px solid var(--pa-line);border-radius:16px;border-bottom-left-radius:5px;background:var(--pa-soft)}
 .pa-typing i{width:7px;height:7px;border-radius:50%;background:var(--pa-muted);animation:pa-b 1.1s infinite ease-in-out}
 .pa-typing i:nth-child(2){animation-delay:.15s}.pa-typing i:nth-child(3){animation-delay:.3s}
@@ -152,6 +200,7 @@ const CSS = `
 .pa-form textarea{flex:1;min-width:0;max-height:140px;padding:8px 4px;border:0;outline:0;resize:none;background:transparent;color:var(--pa-ink);font:inherit;font-size:.93rem;line-height:1.4}
 .pa-form textarea::placeholder{color:var(--pa-muted);opacity:1}
 .pa-form textarea:disabled{opacity:.6}
+.pa-form .pa-icon{height:40px;min-width:40px}
 .pa-send{display:grid;place-items:center;flex:0 0 auto;width:40px;height:40px;padding:0;border:0;border-radius:12px;background:var(--pa-accent);color:var(--pa-accent-ink);font-size:19px;font-weight:700;cursor:pointer}
 .pa-send:hover:not(:disabled){filter:brightness(1.1)}
 .pa-send:disabled{background:var(--pa-line);color:var(--pa-muted);cursor:not-allowed}
@@ -181,7 +230,11 @@ export default function PageAssistant({
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [historyOk, setHistoryOk] = useState(true);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const loadedHistory = useRef(false);
+  const speechRun = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -210,6 +263,14 @@ export default function PageAssistant({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // sair da página para de falar
+  useEffect(() => {
+    return () => {
+      speechRun.current++;
+      if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    };
+  }, []);
+
   // ao abrir pela primeira vez: carrega o histórico desta página e reabre a conversa mais recente
   useEffect(() => {
     if (!open || loadedHistory.current || !pageId) return;
@@ -229,7 +290,77 @@ export default function PageAssistant({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, pageId]);
 
+  function stopSpeaking() {
+    speechRun.current++;
+    if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    setSpeakingId(null);
+  }
+
+  // Lê a resposta da Maria em voz alta (toque de novo para parar)
+  function speak(message: ChatMessage) {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      setNotice("Este navegador não consegue ler em voz alta.");
+      return;
+    }
+    if (speakingId === message.id) {
+      stopSpeaking();
+      return;
+    }
+    stopSpeaking();
+    const text = speechText(message.content);
+    if (!text) return;
+    const chunks = splitForSpeech(text);
+    const run = ++speechRun.current;
+    setNotice(null);
+    setSpeakingId(message.id);
+    const voices = window.speechSynthesis.getVoices();
+    const voice =
+      voices.find((v) => v.lang.toLowerCase().replace("_", "-") === "pt-br") ?? voices.find((v) => v.lang.toLowerCase().startsWith("pt"));
+    let index = 0;
+    const next = () => {
+      if (run !== speechRun.current) return;
+      if (index >= chunks.length) {
+        setSpeakingId(null);
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(chunks[index++]);
+      utterance.lang = "pt-BR";
+      if (voice) utterance.voice = voice;
+      utterance.onend = next;
+      utterance.onerror = () => {
+        if (run === speechRun.current) setSpeakingId(null);
+      };
+      window.speechSynthesis.speak(utterance);
+    };
+    next();
+  }
+
+  // Copia a resposta (em Markdown: ao colar na página, vira títulos, listas e tabelas)
+  async function copyMessage(message: ChatMessage) {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(message.content);
+      ok = true;
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = message.content;
+      area.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      document.body.append(area);
+      area.select();
+      ok = document.execCommand("copy");
+      area.remove();
+    }
+    if (ok) {
+      setNotice(null);
+      setCopiedId(message.id);
+      window.setTimeout(() => setCopiedId((current) => (current === message.id ? null : current)), 2000);
+    } else {
+      setNotice("Não foi possível copiar. Segure o dedo no texto, selecione e use Copiar.");
+    }
+  }
+
   function closePanel() {
+    stopSpeaking();
     setOpen(false);
     setWide(false);
     fabRef.current?.focus();
@@ -239,6 +370,7 @@ export default function PageAssistant({
     type Row = { role: "user" | "assistant"; content: string; attachments: FileInfo[] | null; meta?: { cards?: unknown; insertText?: unknown } | null };
     const result = await supabase.from("chat_messages").select("*").eq("conversation_id", id).order("created_at", { ascending: true }).limit(300);
     if (result.error) return;
+    stopSpeaking();
     setActiveId(id);
     setMessages(
       ((result.data ?? []) as Row[]).map((row, index) => {
@@ -258,6 +390,7 @@ export default function PageAssistant({
   }
 
   function newConversation() {
+    stopSpeaking();
     setActiveId(null);
     setMessages([]);
     setAttachments([]);
@@ -307,6 +440,8 @@ export default function PageAssistant({
     const typed = text.trim();
     if ((!typed && !attachments.length) || loading) return;
     const pending = [...attachments];
+    stopSpeaking();
+    setNotice(null);
     setDraft("");
     setAttachments([]);
     setShowHistory(false);
@@ -463,7 +598,7 @@ export default function PageAssistant({
               <div className="pa-empty">
                 <div className="pa-big" aria-hidden="true">✦</div>
                 <h3>Como posso ajudar nesta página?</h3>
-                <p>Pergunte sobre o conteúdo, peça um resumo ou gere flashcards e questões (inclusive a partir dos PDFs da página) para guardar em Revisões.</p>
+                <p>Pergunte sobre o conteúdo, peça um resumo ou gere flashcards e questões (inclusive a partir dos PDFs da página) para guardar em Revisões. Você também pode falar: toque no microfone 🎤.</p>
                 <div className="pa-starters">
                   {STARTERS.map((s) => (
                     <button type="button" key={s} className="pa-starter" onClick={() => void sendMessage(s)}>{s}</button>
@@ -480,6 +615,16 @@ export default function PageAssistant({
                     <div className="pa-bubble">
                       {m.role === "assistant" && !m.isError ? <div className="pa-md"><Markdown text={m.content} /></div> : m.content}
                     </div>
+                    {m.role === "assistant" && !m.isError && (
+                      <div className="pa-acts">
+                        <button type="button" className={`pa-act${speakingId === m.id ? " on" : ""}`} aria-pressed={speakingId === m.id} aria-label={speakingId === m.id ? "Parar a leitura" : "Ouvir esta resposta"} onClick={() => speak(m)}>
+                          {speakingId === m.id ? "⏹ Parar" : "🔊 Ouvir"}
+                        </button>
+                        <button type="button" className={`pa-act${copiedId === m.id ? " on" : ""}`} aria-label="Copiar esta resposta" onClick={() => void copyMessage(m)}>
+                          {copiedId === m.id ? "✓ Copiado" : "📋 Copiar"}
+                        </button>
+                      </div>
+                    )}
                     {m.files && (
                       <div className="pa-files">{m.files.map((f) => <span key={f.url} className="pa-file">{f.kind === "pdf" ? "📄" : "🖼️"} {f.name}</span>)}</div>
                     )}
@@ -549,6 +694,7 @@ export default function PageAssistant({
         )}
 
         <div className="pa-foot">
+          {notice && <p className="pa-notice" role="alert">{notice}</p>}
           {attachments.length > 0 && (
             <div className="pa-chips">
               {attachments.map((file, i) => (
@@ -577,13 +723,14 @@ export default function PageAssistant({
               value={draft}
               maxLength={4000}
               disabled={loading}
-              placeholder="Pergunte ou peça flashcards, questões…"
+              placeholder="Pergunte, fale 🎤 ou peça flashcards, questões…"
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
             />
+            <VoiceButton value={draft} onChange={setDraft} disabled={loading} onStatus={setNotice} />
             <button type="submit" className="pa-send" aria-label="Enviar mensagem" disabled={!canSend}>↑</button>
           </form>
-          <p className="pa-note">O conteúdo da página e os PDFs dentro dela (até 3) são enviados à Anthropic para gerar a resposta.</p>
+          <p className="pa-note">O conteúdo da página e os PDFs dentro dela (até 3) são enviados à Anthropic para gerar a resposta. O microfone usa o reconhecimento de voz do navegador.</p>
         </div>
       </section>
 
