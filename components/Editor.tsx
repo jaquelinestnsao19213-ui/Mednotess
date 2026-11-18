@@ -447,17 +447,25 @@ export default function Editor({
     }
   }
 
-  async function send(file: File | undefined, kind: "image" | "pdf") {
-    if (!file || !editor) return;
-    setMessage("Enviando arquivo…");
-    try {
-      const url = await uploadFile(file);
-      if (kind === "image") editor.chain().focus().setImage({ src: url }).run();
-      else editor.chain().focus().insertContent({ type: "fileCard", attrs: { url, name: file.name } }).run();
-      setMessage(null);
-    } catch {
-      setMessage("Não foi possível enviar o arquivo. Confira se rodou o schema2.sql no Supabase.");
+  // Aceita vários arquivos de uma vez (PDFs ou imagens): cada um é enviado e inserido em ordem.
+  async function send(files: File[], kind: "image" | "pdf") {
+    if (!files.length || !editor) return;
+    setMessage(files.length > 1 ? `Enviando ${files.length} arquivos…` : "Enviando arquivo…");
+    let failed = 0;
+    for (const file of files) {
+      try {
+        const url = await uploadFile(file);
+        if (kind === "image") editor.chain().focus().setImage({ src: url }).run();
+        else editor.chain().focus().insertContent({ type: "fileCard", attrs: { url, name: file.name } }).run();
+      } catch {
+        failed += 1;
+      }
     }
+    setMessage(
+      failed
+        ? `Não foi possível enviar ${failed} ${failed === 1 ? "arquivo" : "arquivos"}. Confira se rodou o schema2.sql no Supabase.`
+        : null
+    );
   }
 
   function insertSite() {
@@ -724,8 +732,8 @@ export default function Editor({
 
       {recorder && <AudioRecorder onClose={() => setRecorder(false)} onSave={saveRecording} />}
 
-      <input ref={imageInput} type="file" accept="image/*" hidden onChange={(e) => { send(e.target.files?.[0], "image"); e.target.value = ""; }} />
-      <input ref={pdfInput} type="file" accept="application/pdf" hidden onChange={(e) => { send(e.target.files?.[0], "pdf"); e.target.value = ""; }} />
+      <input ref={imageInput} type="file" accept="image/*" multiple hidden onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void send(files, "image"); }} />
+      <input ref={pdfInput} type="file" accept="application/pdf" multiple hidden onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; void send(files, "pdf"); }} />
       <input ref={audioInput} type="file" accept="audio/*,.m4a,.mp3,.wav,.ogg,.aac,.opus,.flac,.webm" multiple hidden onChange={(e) => { void insertMediaFiles(Array.from(e.target.files ?? []), "audio"); e.target.value = ""; }} />
       <input ref={videoInput} type="file" accept="video/*,.mp4,.mov,.m4v,.webm" multiple hidden onChange={(e) => { void insertMediaFiles(Array.from(e.target.files ?? []), "video"); e.target.value = ""; }} />
     </div>
