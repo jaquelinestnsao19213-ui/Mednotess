@@ -20,6 +20,7 @@ import { FontFamily, StyledTableCell, StyledTableHeader } from "./editor/format-
 import { FontFamilyPicker, TableFormatting } from "./editor/FormatExtras";
 import TableGrip from "./editor/TableGrip";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
+import { InkBlock } from "./editor/ink-extension";
 import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
 import MediaIndex from "./editor/MediaIndex";
@@ -115,6 +116,7 @@ export default function Editor({
 
   const allItems: Cmd[] = [
     ...BLOCKS,
+    { label: "Escrever à mão", keywords: "caneta escrever mao manuscrito desenhar caderno s pen ink", run: (e) => e.chain().focus().insertContent({ type: "inkBlock" }).run() },
     { label: "Imagem", keywords: "imagem foto figura", run: () => imageInput.current?.click() },
     { label: "Copiar página inteira", keywords: "copiar tudo pagina inteira google docs word formatacao", run: () => { void copyWholePage(); } },
     { label: "Colar imagem", keywords: "colar imagem foto copiar area transferencia print", run: () => { void pasteImageFromClipboard(); } },
@@ -189,6 +191,7 @@ export default function Editor({
       WebEmbed,
       AudioNote,
       VideoNote,
+      InkBlock,
       TrailingNode,
       PasteEnhancer,
     ],
@@ -677,6 +680,7 @@ export default function Editor({
             <button type="button" aria-label="Lista com marcadores" className={editor.isActive("bulletList") ? "on" : ""} onClick={() => chain().toggleBulletList().run()}>•</button>
             <button type="button" aria-label="Lista de tarefas" className={editor.isActive("taskList") ? "on" : ""} onClick={() => chain().toggleTaskList().run()}>☑</button>
             <button type="button" aria-label="Inserir imagem" onClick={() => imageInput.current?.click()}>Img</button>
+            <button type="button" aria-label="Escrever à mão" onClick={() => chain().insertContent({ type: "inkBlock" }).run()}>✍</button>
             <button type="button" aria-label="Gravar áudio" onClick={() => setRecorder(true)}>🎙</button>
             <button type="button" aria-label="Baixar PDF" className="pdf-export-btn" onClick={exportPdf}>PDF</button>
             <button type="button" aria-label="Desfazer" disabled={!editor.can().undo()} onClick={() => chain().undo().run()}>↶</button>
