@@ -21,6 +21,7 @@ import { FontFamilyPicker, TableFormatting } from "./editor/FormatExtras";
 import TableGrip from "./editor/TableGrip";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
 import { InkBlock } from "./editor/ink-extension";
+import InkOverlay, { readInkLayer, type InkLayer } from "./editor/InkOverlay";
 import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
 import MediaIndex from "./editor/MediaIndex";
@@ -106,6 +107,13 @@ export default function Editor({
   const [videoLinkValue, setVideoLinkValue] = useState("");
   const [videoLinkError, setVideoLinkError] = useState<string | null>(null);
 
+  // Camada de escrita à mão sobre a página inteira (guardada junto com a página, na chave inkLayer).
+  const [layer, setLayer] = useState<InkLayer>(() => readInkLayer(initial.inkLayer));
+  const [overlayOn, setOverlayOn] = useState(false);
+  const layerRef = useRef(layer);
+  layerRef.current = layer;
+  const withLayer = (doc: JSONContent): JSONContent => (layerRef.current.items.length ? { ...doc, inkLayer: layerRef.current } : doc);
+
   const slashRef = useRef(slash);
   slashRef.current = slash;
   const indexRef = useRef(0);
@@ -114,9 +122,23 @@ export default function Editor({
   const imagesRef = useRef<(files: File[], pos?: number) => Promise<void>>(async () => {});
   const mediaRef = useRef<(files: File[], forced?: "audio" | "video") => Promise<void>>(async () => {});
 
+  function changeLayer(next: InkLayer) {
+    layerRef.current = next;
+    setLayer(next);
+    const e = editorRef.current;
+    if (e) onChangeRef.current(withLayer(e.getJSON()));
+  }
+
+  function startOverlay() {
+    editorRef.current?.commands.blur();
+    setSheet(null);
+    setOverlayOn(true);
+  }
+
   const allItems: Cmd[] = [
     ...BLOCKS,
     { label: "Escrever à mão", keywords: "caneta escrever mao manuscrito desenhar caderno s pen ink", run: (e) => e.chain().focus().insertContent({ type: "inkBlock" }).run() },
+    { label: "Escrever sobre a página", keywords: "caneta escrever mao pagina inteira camada sobrepor desenhar anotar por cima", run: () => startOverlay() },
     { label: "Imagem", keywords: "imagem foto figura", run: () => imageInput.current?.click() },
     { label: "Copiar página inteira", keywords: "copiar tudo pagina inteira google docs word formatacao", run: () => { void copyWholePage(); } },
     { label: "Colar imagem", keywords: "colar imagem foto copiar area transferencia print", run: () => { void pasteImageFromClipboard(); } },
@@ -200,7 +222,7 @@ export default function Editor({
       editorRef.current = editor;
     },
     onUpdate: ({ editor }) => {
-      onChangeRef.current(editor.getJSON());
+      onChangeRef.current(withLayer(editor.getJSON()));
       checkSlash(editor);
     },
     onSelectionUpdate: ({ editor }) => checkSlash(editor),
@@ -514,7 +536,10 @@ export default function Editor({
       </BubbleMenu>
 
       <MediaIndex editor={editor} />
-      <EditorContent editor={editor} />
+      <div style={{ position: "relative" }}>
+        <EditorContent editor={editor} />
+        <InkOverlay layer={layer} onChange={changeLayer} active={overlayOn} onClose={() => setOverlayOn(false)} />
+      </div>
       <TableGrip editor={editor} />
       {message && <p className="notice">{message}</p>}
       {slash && items.length > 0 && (
@@ -672,7 +697,8 @@ export default function Editor({
             <button type="button" aria-label="Lista com marcadores" className={editor.isActive("bulletList") ? "on" : ""} onClick={() => chain().toggleBulletList().run()}>•</button>
             <button type="button" aria-label="Lista de tarefas" className={editor.isActive("taskList") ? "on" : ""} onClick={() => chain().toggleTaskList().run()}>☑</button>
             <button type="button" aria-label="Inserir imagem" onClick={() => imageInput.current?.click()}>Img</button>
-            <button type="button" aria-label="Escrever à mão" onClick={() => chain().insertContent({ type: "inkBlock" }).run()}>✍</button>
+            <button type="button" aria-label="Escrever à mão em um bloco" onClick={() => chain().insertContent({ type: "inkBlock" }).run()}>✍</button>
+            <button type="button" aria-label="Escrever à mão sobre a página inteira" onClick={startOverlay}>🖊</button>
             <button type="button" aria-label="Gravar áudio" onClick={() => setRecorder(true)}>🎙</button>
             <button type="button" aria-label="Baixar PDF" className="pdf-export-btn" onClick={exportPdf}>PDF</button>
             <button type="button" aria-label="Desfazer" disabled={!editor.can().undo()} onClick={() => chain().undo().run()}>↶</button>
