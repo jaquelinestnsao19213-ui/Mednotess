@@ -1,7 +1,8 @@
-/* Tabelas do editor: visual moderno, colunas redimensionáveis e alça para mover (carregado depois do globals.css) */
+/* Tabelas do editor: visual moderno, colunas redimensionáveis (arrastar a borda) e alça para mover (carregado depois do globals.css) */
 .tiptap .tableWrapper { position: relative; overflow-x: auto; margin: 1.1em 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); -webkit-overflow-scrolling: touch; }
 .tiptap table { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; margin: 0; font-size: 0.95em; line-height: 1.45; }
-.tiptap th, .tiptap td { position: relative; box-sizing: border-box; min-width: 60px; padding: 9px 12px; border: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); vertical-align: top; }
+/* touch-action: o dedo arrasta a borda para os lados (a rolagem para cima e para baixo continua normal) */
+.tiptap th, .tiptap td { position: relative; box-sizing: border-box; min-width: 48px; padding: 9px 12px; border: 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); vertical-align: top; touch-action: pan-y; }
 .tiptap tr > :last-child { border-right: 0; }
 .tiptap tr:last-child > * { border-bottom: 0; }
 .tiptap th { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); font-weight: 700; text-align: left; letter-spacing: 0.01em; }
@@ -9,7 +10,12 @@
 .tiptap td > :first-child, .tiptap th > :first-child { margin-top: 0; }
 .tiptap td > :last-child, .tiptap th > :last-child { margin-bottom: 0; }
 .tiptap .selectedCell { background: color-mix(in srgb, var(--accent) 18%, transparent) !important; }
-.tiptap .column-resize-handle { position: absolute; right: -2px; top: 0; bottom: 0; z-index: 3; width: 5px; background: var(--accent); opacity: 0.55; pointer-events: none; }
+/* marquinha discreta na borda entre colunas: mostra onde segurar e arrastar */
+.tiptap tr > :not(:last-child)::after { content: ""; position: absolute; right: -2px; top: 28%; bottom: 28%; width: 4px; border-radius: 3px; background: color-mix(in srgb, var(--ink) 16%, transparent); pointer-events: none; z-index: 1; }
+.tiptap tr > :not(:last-child):hover::after { background: color-mix(in srgb, var(--accent) 60%, transparent); }
+/* a alça antiga de redimensionar fica escondida: agora vale arrastar a borda */
+.tiptap .column-resize-handle { display: none !important; }
+.tiptap.col-resize-cursor, .tiptap.col-resize-cursor * { cursor: col-resize; }
 .tiptap.resize-cursor, .resize-cursor .tiptap { cursor: col-resize; }
 .tbl-grip { position: fixed; z-index: 40; display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 6px 20px rgb(0 0 0 / 0.16); user-select: none; -webkit-user-select: none; }
 .tbl-grip button, .tbl-drag { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; height: 34px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-size: 1.05rem; line-height: 1; }
