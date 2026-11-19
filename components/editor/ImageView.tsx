@@ -3,15 +3,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { NodeSelection } from "@tiptap/pm/state";
+import type { Node as PMNode } from "@tiptap/pm/model";
 import { normalizeStrokes } from "../../lib/image-strokes";
 import { alignFromX, boundaryNear, moveNodeTo, type Align, type Slot } from "../../lib/block-move";
+import { fitWidth, rowRange } from "../../lib/image-row";
 import type { Item } from "../pdf/types";
 import StrokeCanvas from "./StrokeCanvas";
 import ImageLightbox from "./ImageLightbox";
 import ImageDrawModal from "./ImageDrawModal";
 
 // Imagem do caderno. Ao tocar nela aparece a barra de ações (como no Canva):
-// arrastar, subir/descer, ampliar, desenhar e remover. A alça no canto muda o tamanho.
+// arrastar, subir/descer, lado a lado, ampliar, desenhar e remover. A alça no canto muda o tamanho.
 export default function ImageView({ node, updateAttributes, selected, editor, getPos, deleteNode }: NodeViewProps) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -19,6 +21,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   const [below, setBelow] = useState(false);
   const [dragging, setDragging] = useState(false);
   const strokes = useMemo(() => normalizeStrokes(node.attrs.strokes), [node.attrs.strokes]);
+  const isRow = !!node.attrs.row;
 
   // Se a imagem estiver colada no topo da tela, a barra aparece embaixo dela.
   useEffect(() => {
@@ -49,6 +52,61 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     tr = tr.insert(insertAt, node);
     tr = tr.setSelection(NodeSelection.create(tr.doc, insertAt));
     view.dispatch(tr.scrollIntoView());
+  }
+
+  // ----- Lado a lado: imagens seguidas marcadas como "linha" ficam juntas e dividem a largura -----
+  function neighbours() {
+    const at = where();
+    if (!at) return null;
+    const $pos = editor.state.doc.resolve(at.pos);
+    let p = $pos.start();
+    const kids: { pos: number; node: PMNode; isImage: boolean; row: boolean }[] = [];
+    $pos.parent.forEach((child) => {
+      kids.push({ pos: p, node: child, isImage: child.type === node.type, row: !!child.attrs.row });
+      p += child.nodeSize;
+    });
+    return { index: at.index, kids };
+  }
+
+  function applyRow(kids: { pos: number; node: PMNode; isImage: boolean; row: boolean }[], rows: boolean[], index: number, fit: boolean) {
+    const { state, view } = editor;
+    const [a, b] = rowRange(kids.map((k, i) => ({ isImage: k.isImage, row: rows[i] })), index);
+    const count = b - a + 1;
+    const width = fit && count > 1 ? fitWidth(view.dom.clientWidth || 800, count) : null;
+    let tr = state.tr;
+    kids.forEach((k, i) => {
+      if (!k.isImage) return;
+      const inGroup = width !== null && i >= a && i <= b;
+      if (rows[i] === k.row && !inGroup) return;
+      tr = tr.setNodeMarkup(k.pos, undefined, { ...k.node.attrs, row: rows[i], ...(inGroup ? { width } : {}) });
+    });
+    if (tr.docChanged) view.dispatch(tr);
+  }
+
+  // Liga/desliga o "lado a lado". Ao ligar, junta com as imagens vizinhas e divide a largura igualmente.
+  function toggleRow() {
+    const info = neighbours();
+    if (!info) return;
+    const { index, kids } = info;
+    const rows = kids.map((k) => k.row);
+    if (!isRow) {
+      rows[index] = true;
+      if (kids[index - 1]?.isImage) rows[index - 1] = true;
+      if (kids[index + 1]?.isImage) rows[index + 1] = true;
+      applyRow(kids, rows, index, true);
+      return;
+    }
+    const [a, b] = rowRange(kids.map((k) => ({ isImage: k.isImage, row: k.row })), index);
+    if (b - a + 1 <= 2) for (let i = a; i <= b; i++) rows[i] = false; // sobrou só uma: volta ao normal
+    else rows[index] = false;
+    applyRow(kids, rows, index, false);
+  }
+
+  // Iguala o tamanho de todas as imagens da linha para caberem juntas.
+  function fitRow() {
+    const info = neighbours();
+    if (!info) return;
+    applyRow(info.kids, info.kids.map((k) => k.row), info.index, true);
   }
 
   // Clicar na imagem e arrastar: ela vai para qualquer ponto da página (entre parágrafos, dentro de avisos…)
@@ -171,7 +229,8 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     if (!el) return;
     const startX = e.clientX;
     const startW = el.offsetWidth;
-    const maxW = el.parentElement?.parentElement?.offsetWidth ?? 800;
+    // limite = largura da página de escrita (em "lado a lado" o bloco da imagem é estreito, então não serve de medida)
+    const maxW = editor.view.dom.clientWidth || 800;
     const moveFn = (ev: PointerEvent) => {
       const w = Math.round(Math.min(maxW, Math.max(80, startW + (ev.clientX - startX))));
       updateAttributes({ width: w });
@@ -185,9 +244,10 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   }
 
   const src = node.attrs.src as string;
+  const wrapClass = ["img-wrap", isRow ? "in-row" : "", dragging ? "dragging" : ""].filter(Boolean).join(" ");
 
   return (
-    <NodeViewWrapper className={dragging ? "img-wrap dragging" : "img-wrap"} data-selected={selected ? "true" : "false"} style={{ textAlign: (node.attrs.align as Align | null) ?? undefined }}>
+    <NodeViewWrapper className={wrapClass} data-selected={selected ? "true" : "false"} style={{ textAlign: (node.attrs.align as Align | null) ?? undefined }}>
       <div ref={box} className="img-box" style={{ width: node.attrs.width ? `${node.attrs.width}px` : undefined }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img ref={img} src={src} alt={node.attrs.alt ?? ""} draggable={false} onPointerDown={startDrag} onDoubleClick={() => setModal("zoom")} />
@@ -198,6 +258,8 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
             <span className="img-grip" data-drag-handle draggable="true" title="Arrastar para outro lugar" aria-label="Arrastar imagem">⠿</span>
             <button type="button" aria-label="Mover para cima" disabled={!canUp} onClick={() => move(-1)}>↑</button>
             <button type="button" aria-label="Mover para baixo" disabled={!canDown} onClick={() => move(1)}>↓</button>
+            <button type="button" aria-label="Lado a lado com a imagem vizinha (até 3 ou mais por linha)" title="Lado a lado" className={isRow ? "on" : ""} aria-pressed={isRow} onClick={toggleRow}>▥</button>
+            {isRow && <button type="button" aria-label="Igualar o tamanho das imagens da linha" title="Igualar o tamanho" onClick={fitRow}>⇔</button>}
             <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
             <button type="button" aria-label="Ampliar imagem" onClick={() => setModal("zoom")}>⤢</button>
             <button type="button" aria-label="Desenhar na imagem" className={strokes.length ? "on" : ""} onClick={() => setModal("draw")}>✎</button>

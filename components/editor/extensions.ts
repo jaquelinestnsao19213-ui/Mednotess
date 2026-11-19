@@ -73,6 +73,13 @@ export const ImageWithWidth = Image.extend({
                 ? { "data-align": "left" }
                 : {},
       },
+      // "Lado a lado": imagens seguidas com esta marca ficam na mesma linha, dividindo a largura da página.
+      row: {
+        default: false,
+        parseHTML: (el: HTMLElement) => el.getAttribute("data-row") === "true",
+        renderHTML: (attrs: Record<string, unknown>) =>
+          attrs.row ? { "data-row": "true", style: "display:inline-block;vertical-align:top;margin-right:8px" } : {},
+      },
       // Desenho feito por cima da imagem (coordenadas de 0 a 1). Guardado no bloco; a imagem original não muda.
       strokes: {
         default: null,
