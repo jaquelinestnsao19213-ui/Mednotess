@@ -48,6 +48,13 @@ function clean(html: string): string {
         return;
       }
       const bg = lightBackground(el.style.backgroundColor);
+      // Os botões B / I / U / S gravam a formatação como estilo (span); guarda esses estilos para não sumirem ao reabrir.
+      const fw = el.style.fontWeight;
+      const bold = fw === "bold" || fw === "bolder" || Number(fw) >= 600;
+      const italic = el.style.fontStyle === "italic";
+      const deco = el.style.textDecorationLine || el.style.textDecoration || "";
+      const under = deco.includes("underline");
+      const strike = deco.includes("line-through");
       const keep: Record<string, string> = {};
       for (const a of KEEP_ATTRS[el.tagName] ?? []) {
         const v = el.getAttribute(a);
@@ -78,6 +85,9 @@ function clean(html: string): string {
       }
       for (const [k, v] of Object.entries(keep)) el.setAttribute(k, v);
       if (bg) el.style.backgroundColor = bg;
+      if (bold) el.style.fontWeight = "bold";
+      if (italic) el.style.fontStyle = "italic";
+      if (under || strike) el.style.textDecoration = [under ? "underline" : "", strike ? "line-through" : ""].filter(Boolean).join(" ");
     });
   };
   walk(tpl.content);
@@ -129,7 +139,9 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
   function sync() {
     const el = ed.current;
     if (!el) return;
-    patchRef.current({ html: el.innerHTML, text: el.innerText });
+    // Comentário só com imagem não pode ser tratado como vazio (comentário vazio é apagado ao fechar).
+    const text = el.innerText.trim() === "" && el.querySelector("img") ? "[imagem]" : el.innerText;
+    patchRef.current({ html: el.innerHTML, text });
   }
 
   function cmd(name: string, value?: string) {
