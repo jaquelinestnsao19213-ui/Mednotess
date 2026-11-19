@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { Editor as TipEditor } from "@tiptap/core";
+import ListenPage from "./ListenPage";
 
 type Item = { pos: number; kind: "audio" | "video"; title: string; subject: string };
 
@@ -31,8 +32,6 @@ export default function MediaIndex({ editor }: { editor: TipEditor }) {
     };
   }, [editor]);
 
-  if (items.length === 0) return null;
-
   function go(item: Item) {
     const dom = editor.view.nodeDOM(item.pos);
     if (!(dom instanceof HTMLElement)) return;
@@ -42,6 +41,9 @@ export default function MediaIndex({ editor }: { editor: TipEditor }) {
   }
 
   return (
+    <>
+      <ListenPage editor={editor} />
+      {items.length > 0 && (
     <details className="mm-index">
       <summary>🎧 Mídias desta página ({items.length})</summary>
       <ol>
@@ -56,5 +58,7 @@ export default function MediaIndex({ editor }: { editor: TipEditor }) {
         ))}
       </ol>
     </details>
+      )}
+    </>
   );
 }
