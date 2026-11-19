@@ -25,7 +25,8 @@ export type EllipseItem = {
 
 export type Item = InkItem | EllipseItem;
 
-export type Note = { id: string; x: number; y: number; text: string; color: string };
+// text = texto simples (busca e comentário vazio); html = texto formatado; w/h = tamanho da caixa (px); fs = tamanho da letra (px)
+export type Note = { id: string; x: number; y: number; text: string; color: string; html?: string; w?: number; h?: number; fs?: number };
 
 export type PageAnn = { items: Item[]; notes: Note[] };
 

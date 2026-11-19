@@ -1,0 +1,37 @@
+/* ---------- Página mais larga, imagens lado a lado e comentários de PDF editáveis ---------- */
+
+/* Páginas do caderno usam quase toda a largura da tela */
+.shell.wide { max-width: min(1280px, 100%); padding-left: 14px; padding-right: 14px; }
+.shell.wide .pdfnb-scroller { height: min(86vh, 1200px); }
+
+/* Imagens lado a lado: cada imagem ocupa uma fração da linha (50%, 33%, 66%…) */
+.tiptap .node-image[data-span] {
+  display: inline-block; vertical-align: top;
+  width: calc(var(--span) * 1% - 9px);
+  margin: 0 8px 8px 0;
+}
+.tiptap > :not([data-span]) + .node-image[data-span] { margin-top: 0.55em; }
+.img-wrap[data-span] .img-box { display: block; width: 100%; }
+.img-toolbar { max-width: 92vw; flex-wrap: wrap; }
+
+/* Comentário do PDF: editor com formatação, redimensionável */
+.pdfnote-card {
+  position: absolute; z-index: 6; box-sizing: border-box; padding: 8px 8px 20px; display: grid; gap: 8px;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.25);
+}
+.pdfnote-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.pdfnote-tools .pdfnb-btn { min-width: 34px; height: 32px; padding: 0 8px; }
+.pdfnote-edit {
+  box-sizing: border-box; overflow: auto; padding: 8px 10px; line-height: 1.5; outline: none;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere;
+  -webkit-user-select: text; user-select: text; touch-action: pan-y;
+}
+.pdfnote-edit:focus { border-color: var(--accent); }
+.pdfnote-edit h4 { margin: 0 0 4px; font-size: 1.2em; font-weight: 700; }
+.pdfnote-edit ul, .pdfnote-edit ol { margin: 4px 0; padding-left: 1.3em; }
+.pdfnote-grip {
+  position: absolute; right: 2px; bottom: 2px; width: 30px; height: 30px; cursor: nwse-resize; touch-action: none;
+  border-radius: 0 0 10px 0;
+  background: linear-gradient(135deg, transparent 52%, var(--muted) 52%, var(--muted) 60%, transparent 60%, transparent 72%, var(--muted) 72%, var(--muted) 80%, transparent 80%);
+}

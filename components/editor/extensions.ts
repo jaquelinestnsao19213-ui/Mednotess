@@ -57,6 +57,21 @@ export const ImageWithWidth = Image.extend({
         renderHTML: (attrs: Record<string, unknown>) =>
           attrs.width ? { width: attrs.width, style: `width:${attrs.width}px;max-width:100%` } : {},
       },
+      // Lado a lado: fração da linha (ex.: 50 = duas imagens por linha, 33 = três). Vazio = imagem normal.
+      span: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = parseInt(el.getAttribute("data-span") ?? "", 10);
+          return Number.isFinite(v) && v >= 10 && v < 100 ? v : null;
+        },
+        renderHTML: (attrs: Record<string, unknown>) =>
+          attrs.span
+            ? {
+                "data-span": String(attrs.span),
+                style: `display:inline-block;vertical-align:top;width:calc(${attrs.span}% - 9px);margin:0 8px 8px 0`,
+              }
+            : {},
+      },
       // Onde a imagem fica na linha: esquerda, centro ou direita.
       align: {
         default: null,

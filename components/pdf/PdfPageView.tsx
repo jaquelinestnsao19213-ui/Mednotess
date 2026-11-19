@@ -3,6 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { drawItem, drawItems, hitItem } from "./draw";
+import NoteCard from "./NoteCard";
 import {
   opAddItem,
   opRemoveItems,
@@ -10,6 +11,7 @@ import {
   type EllipseItem,
   type InkItem,
   type Item,
+  type Note,
   type Op,
   type PageAnn,
   type Tool,
@@ -253,6 +255,13 @@ function PdfPageView(p: PageProps) {
     paintLive();
   }
 
+  function patchNote(id: string, patch: Partial<Note>) {
+    const a = annRef.current;
+    const next = { ...a, notes: a.notes.map((x) => (x.id === id ? { ...x, ...patch } : x)) };
+    annRef.current = next;
+    p.onApply(n, next);
+  }
+
   const drawingTool = p.tool === "pen" || p.tool === "highlighter" || p.tool === "circle" || p.tool === "eraser";
   const hasOpenNote = p.ann.notes.some((x) => x.id === p.openNoteId);
 
@@ -298,30 +307,12 @@ function PdfPageView(p: PageProps) {
             💬
           </button>
           {p.openNoteId === note.id && (
-            <div
-              className="pdfnote-pop"
-              style={{
-                top: `calc(${note.y * 100}% + 8px)`,
-                ...(note.x > 0.55 ? { right: `${(1 - note.x) * 100}%` } : { left: `${note.x * 100}%` }),
-              }}
-            >
-              <textarea
-                autoFocus
-                rows={4}
-                value={note.text}
-                placeholder="Escreva seu comentário…"
-                aria-label="Comentário"
-                onChange={(e) => p.onNoteText(n, note.id, e.target.value)}
-              />
-              <div className="pdfnote-actions">
-                <button type="button" className="pdfnb-btn" onClick={() => p.onNoteDelete(n, note.id)}>
-                  Excluir
-                </button>
-                <button type="button" className="pdfnb-btn on" onClick={() => p.onOpenNote(null)}>
-                  Pronto
-                </button>
-              </div>
-            </div>
+            <NoteCard
+              note={note}
+              onPatch={(patch) => patchNote(note.id, patch)}
+              onDelete={() => p.onNoteDelete(n, note.id)}
+              onClose={() => p.onOpenNote(null)}
+            />
           )}
         </div>
       ))}

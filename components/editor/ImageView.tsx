@@ -10,8 +10,11 @@ import StrokeCanvas from "./StrokeCanvas";
 import ImageLightbox from "./ImageLightbox";
 import ImageDrawModal from "./ImageDrawModal";
 
+// Frações da linha para colocar imagens lado a lado (50% = duas por linha, 33% = três por linha).
+const SPANS: (number | null)[] = [null, 50, 33, 66];
+
 // Imagem do caderno. Ao tocar nela aparece a barra de ações (como no Canva):
-// arrastar, subir/descer, ampliar, desenhar e remover. A alça no canto muda o tamanho.
+// arrastar, subir/descer, lado a lado, ampliar, desenhar e remover. A alça no canto muda o tamanho.
 export default function ImageView({ node, updateAttributes, selected, editor, getPos, deleteNode }: NodeViewProps) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -19,6 +22,20 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   const [below, setBelow] = useState(false);
   const [dragging, setDragging] = useState(false);
   const strokes = useMemo(() => normalizeStrokes(node.attrs.strokes), [node.attrs.strokes]);
+  const span = (node.attrs.span as number | null) ?? null;
+
+  // Passa a fração da linha para o bloco externo do editor, que é quem fica "lado a lado".
+  useEffect(() => {
+    const outer = box.current?.closest<HTMLElement>(".node-image");
+    if (!outer) return;
+    if (span) {
+      outer.dataset.span = String(span);
+      outer.style.setProperty("--span", String(span));
+    } else {
+      delete outer.dataset.span;
+      outer.style.removeProperty("--span");
+    }
+  }, [span]);
 
   // Se a imagem estiver colada no topo da tela, a barra aparece embaixo dela.
   useEffect(() => {
@@ -142,7 +159,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
       const col = view.dom.getBoundingClientRect();
       const wide = el.offsetWidth > col.width * 0.85;
       const moved = Math.abs(px - start.x) > 40; // só muda o lado se a pessoa realmente puxou para o lado
-      const align: Align | null = !wide && moved ? alignFromX(px, col.left, col.width) : null;
+      const align: Align | null = !wide && moved && !span ? alignFromX(px, col.left, col.width) : null;
       if (tr) {
         if (align) tr.setNodeMarkup(tr.selection.from, undefined, { ...node.attrs, align });
         view.dispatch(tr);
@@ -164,6 +181,13 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     updateAttributes({ align: order[(order.indexOf(now) + 1) % order.length] });
   }
 
+  // Lado a lado: normal → 50% → 33% → 66% → normal.
+  function cycleSpan() {
+    const i = SPANS.indexOf(span);
+    const next = SPANS[(i + 1) % SPANS.length];
+    updateAttributes({ span: next, width: next ? null : node.attrs.width });
+  }
+
   function startResize(e: React.PointerEvent) {
     e.preventDefault();
     e.stopPropagation();
@@ -171,8 +195,16 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     if (!el) return;
     const startX = e.clientX;
     const startW = el.offsetWidth;
+    const col = editor.view.dom.clientWidth || 800;
     const maxW = el.parentElement?.parentElement?.offsetWidth ?? 800;
     const moveFn = (ev: PointerEvent) => {
+      if (span) {
+        // Em "lado a lado" o tamanho é uma fração da linha (de 5 em 5%).
+        const pct = Math.round(((startW + (ev.clientX - startX) + 9) / col) * 20) * 5;
+        if (pct >= 95) updateAttributes({ span: null, width: null });
+        else updateAttributes({ span: Math.max(15, pct), width: null });
+        return;
+      }
       const w = Math.round(Math.min(maxW, Math.max(80, startW + (ev.clientX - startX))));
       updateAttributes({ width: w });
     };
@@ -187,8 +219,13 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   const src = node.attrs.src as string;
 
   return (
-    <NodeViewWrapper className={dragging ? "img-wrap dragging" : "img-wrap"} data-selected={selected ? "true" : "false"} style={{ textAlign: (node.attrs.align as Align | null) ?? undefined }}>
-      <div ref={box} className="img-box" style={{ width: node.attrs.width ? `${node.attrs.width}px` : undefined }}>
+    <NodeViewWrapper
+      className={dragging ? "img-wrap dragging" : "img-wrap"}
+      data-selected={selected ? "true" : "false"}
+      data-span={span ?? undefined}
+      style={{ textAlign: span ? undefined : ((node.attrs.align as Align | null) ?? undefined) }}
+    >
+      <div ref={box} className="img-box" style={{ width: !span && node.attrs.width ? `${node.attrs.width}px` : undefined }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img ref={img} src={src} alt={node.attrs.alt ?? ""} draggable={false} onPointerDown={startDrag} onDoubleClick={() => setModal("zoom")} />
         {strokes.length > 0 && <StrokeCanvas items={strokes} />}
@@ -198,7 +235,10 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
             <span className="img-grip" data-drag-handle draggable="true" title="Arrastar para outro lugar" aria-label="Arrastar imagem">⠿</span>
             <button type="button" aria-label="Mover para cima" disabled={!canUp} onClick={() => move(-1)}>↑</button>
             <button type="button" aria-label="Mover para baixo" disabled={!canDown} onClick={() => move(1)}>↓</button>
-            <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
+            <button type="button" aria-label="Colocar imagens lado a lado (50%, 33%, 66%)" title="Lado a lado" className={span ? "on" : ""} onClick={cycleSpan}>{span ? `${span}%` : "▥"}</button>
+            {!span && (
+              <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
+            )}
             <button type="button" aria-label="Ampliar imagem" onClick={() => setModal("zoom")}>⤢</button>
             <button type="button" aria-label="Desenhar na imagem" className={strokes.length ? "on" : ""} onClick={() => setModal("draw")}>✎</button>
             <button type="button" aria-label="Remover imagem" className="danger" onClick={() => deleteNode()}>🗑</button>

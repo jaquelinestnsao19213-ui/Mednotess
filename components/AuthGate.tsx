@@ -54,7 +54,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
           );
         })}
       </nav>
-      <main className="shell">
+      <main className={pathname.startsWith("/p/") ? "shell wide" : "shell"}>
         {children}
         {pathname === "/" && <ResourceLibrary />}
       </main>
