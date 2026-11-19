@@ -137,6 +137,28 @@ export default function AudioView({ node, updateAttributes, deleteNode, editor, 
     }
   }
 
+  async function copyAudio() {
+    const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const label = title || "Áudio";
+    const html =
+      `<a data-audio-note href="${esc(url)}" data-title="${esc(title)}" data-description="${esc(description)}" ` +
+      `data-duration="${Number(node.attrs.duration) || 0}" data-recorded="${Boolean(node.attrs.recorded)}">🎧 ${esc(label)}</a>`;
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([`🎧 ${label}`], { type: "text/plain" }),
+        }),
+      ]);
+      setError(null);
+      setBusy("Áudio copiado. Abra a outra página e cole (Ctrl+V ou segurar e colar).");
+      window.setTimeout(() => setBusy(null), 4000);
+      setMenu(false);
+    } catch {
+      setError("Não consegui copiar. Permita o acesso à área de transferência no navegador e tente de novo.");
+    }
+  }
+
   async function remove() {
     if (!window.confirm("Excluir este áudio? O arquivo também será apagado do armazenamento.")) return;
     setBusy("Excluindo…");
@@ -174,6 +196,7 @@ export default function AudioView({ node, updateAttributes, deleteNode, editor, 
       {editable && menu && (
         <div className="mm-menu">
           <button type="button" className="mm-btn" onClick={() => replaceInput.current?.click()}>Substituir arquivo</button>
+          <button type="button" className="mm-btn" onClick={() => void copyAudio()}>Copiar áudio</button>
           <a className="mm-btn" href={url} target="_blank" rel="noopener noreferrer">Abrir / baixar ↗</a>
           <button type="button" className="mm-btn danger" onClick={() => void remove()}>Excluir</button>
         </div>
