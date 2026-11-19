@@ -2,11 +2,30 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Note } from "./types";
+import { extFromFile, mediaErrorMessage, uploadMedia } from "@/lib/media";
 
-const ALLOWED = new Set(["B", "STRONG", "I", "EM", "U", "H4", "MARK", "SPAN", "UL", "OL", "LI", "BR", "DIV", "P"]);
-const DROP = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED"]);
+const ALLOWED = new Set([
+  "B", "STRONG", "I", "EM", "U", "S", "STRIKE", "DEL", "H1", "H2", "H3", "H4", "H5", "H6", "MARK", "SPAN",
+  "UL", "OL", "LI", "BR", "DIV", "P", "BLOCKQUOTE", "CODE", "PRE", "A", "IMG", "HR",
+  "TABLE", "THEAD", "TBODY", "TR", "TH", "TD",
+]);
+const DROP = new Set([
+  "SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "TITLE", "META", "LINK", "NOSCRIPT", "SVG", "CANVAS",
+  "BUTTON", "INPUT", "SELECT", "TEXTAREA", "FORM", "VIDEO", "AUDIO",
+]);
+const KEEP_ATTRS: Record<string, string[]> = { A: ["href"], IMG: ["src", "alt"], TD: ["colspan", "rowspan"], TH: ["colspan", "rowspan"] };
 
-// Mantém só a formatação simples do comentário (negrito, título, marca-texto, lista).
+// Só mantém marca-texto de cor clara (cópias de sites escuros trazem fundo escuro que some o texto).
+function lightBackground(css: string): string {
+  const m = css.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/);
+  if (!m) return "";
+  const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const a = m[4] === undefined ? 1 : Number(m[4]);
+  if (a < 0.1) return "";
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.6 && !(r > 245 && g > 245 && b > 245) ? css : "";
+}
+
+// Mantém a formatação do texto (título, negrito, listas, tabelas, links, imagens, marca-texto) e tira o resto.
 function clean(html: string): string {
   const tpl = document.createElement("template");
   tpl.innerHTML = html;
@@ -28,8 +47,36 @@ function clean(html: string): string {
         parent.removeChild(el);
         return;
       }
-      const bg = el.style.backgroundColor;
+      const bg = lightBackground(el.style.backgroundColor);
+      const keep: Record<string, string> = {};
+      for (const a of KEEP_ATTRS[el.tagName] ?? []) {
+        const v = el.getAttribute(a);
+        if (v) keep[a] = v;
+      }
       Array.from(el.attributes).forEach((a) => el.removeAttribute(a.name));
+      if (el.tagName === "A") {
+        if (/^(https?:|mailto:)/i.test(keep.href ?? "")) {
+          el.setAttribute("href", keep.href);
+          el.setAttribute("target", "_blank");
+          el.setAttribute("rel", "noopener noreferrer");
+        } else {
+          while (el.firstChild) parent.insertBefore(el.firstChild, el);
+          parent.removeChild(el);
+          return;
+        }
+        return;
+      }
+      if (el.tagName === "IMG") {
+        if (/^(https?:\/\/|data:image\/)/i.test(keep.src ?? "")) {
+          el.setAttribute("src", keep.src);
+          if (keep.alt) el.setAttribute("alt", keep.alt);
+          el.style.maxWidth = "100%";
+        } else {
+          parent.removeChild(el);
+        }
+        return;
+      }
+      for (const [k, v] of Object.entries(keep)) el.setAttribute(k, v);
       if (bg) el.style.backgroundColor = bg;
     });
   };
@@ -60,6 +107,9 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
   const patchRef = useRef(onPatch);
   patchRef.current = onPatch;
   const [size, setSize] = useState({ w: note.w ?? 300, h: note.h ?? 150 });
+  const [status, setStatus] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const savedRange = useRef<Range | null>(null);
   const fs = note.fs ?? 14;
 
   useEffect(() => {
@@ -87,6 +137,64 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
     document.execCommand("styleWithCSS", false, "true");
     document.execCommand(name, false, value);
     sync();
+  }
+
+  function insertHtml(html: string) {
+    ed.current?.focus();
+    document.execCommand("insertHTML", false, html);
+    sync();
+    void rehostImages();
+  }
+
+  // Imagens coladas que vêm embutidas (data:) são enviadas ao Storage para o comentário não ficar pesado.
+  async function rehostImages() {
+    const el = ed.current;
+    if (!el) return;
+    const imgs = Array.from(el.querySelectorAll<HTMLImageElement>('img[src^="data:"]'));
+    for (const img of imgs) {
+      try {
+        const blob = await (await fetch(img.src)).blob();
+        img.src = await uploadMedia(blob, extFromFile({ type: blob.type }));
+        sync();
+      } catch {
+        // mantém a imagem embutida se o envio falhar
+      }
+    }
+  }
+
+  async function insertImages(files: File[]) {
+    const imgs = files.filter((f) => f.type.startsWith("image/"));
+    if (!imgs.length) return;
+    setStatus("Enviando imagem…");
+    try {
+      const urls: string[] = [];
+      for (const f of imgs) urls.push(await uploadMedia(f, extFromFile(f)));
+      const el = ed.current;
+      if (el) {
+        el.focus();
+        const sel = window.getSelection();
+        if (savedRange.current) {
+          sel?.removeAllRanges();
+          sel?.addRange(savedRange.current);
+        }
+      }
+      insertHtml(urls.map((u) => `<img src="${u}" style="max-width:100%">`).join("<br>"));
+      setStatus(null);
+    } catch (cause) {
+      setStatus(mediaErrorMessage(cause));
+    }
+  }
+
+  function pickImage() {
+    const sel = window.getSelection();
+    savedRange.current = sel && sel.rangeCount && ed.current?.contains(sel.anchorNode) ? sel.getRangeAt(0).cloneRange() : null;
+    fileInput.current?.click();
+  }
+
+  function addLink() {
+    const url = window.prompt("Endereço do link (https://…)");
+    if (!url || !/^(https?:\/\/|mailto:)/i.test(url.trim())) return;
+    cmd("createLink", url.trim());
   }
 
   function toggleTitle() {
@@ -149,9 +257,15 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
       <div className="pdfnote-tools" role="toolbar" aria-label="Formatar comentário">
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("bold")} aria-label="Negrito"><b>B</b></button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("italic")} aria-label="Itálico"><i>I</i></button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("underline")} aria-label="Sublinhado"><u>U</u></button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("strikeThrough")} aria-label="Tachado"><s>S</s></button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={toggleTitle} aria-label="Título">Título</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={toggleMark} aria-label="Marca-texto">🖍</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("insertUnorderedList")} aria-label="Lista">• Lista</button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("insertOrderedList")} aria-label="Lista numerada">1. Lista</button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={addLink} aria-label="Link">🔗</button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={pickImage} aria-label="Inserir imagem">🖼</button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => cmd("removeFormat")} aria-label="Limpar formatação">Tx</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => setFont(-2)} aria-label="Diminuir letra">A−</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => setFont(2)} aria-label="Aumentar letra">A+</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={toggleBig} aria-label="Expandir ou recolher comentário">⤢</button>
@@ -170,11 +284,49 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
         onKeyDown={(e) => e.stopPropagation()}
         onPaste={(e) => {
           e.preventDefault();
-          const t = e.clipboardData.getData("text/plain");
-          document.execCommand("insertText", false, t);
-          sync();
+          const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+          if (files.length) {
+            const sel = window.getSelection();
+            savedRange.current = sel && sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null;
+            void insertImages(files);
+            return;
+          }
+          const html = e.clipboardData.getData("text/html");
+          const cleaned = html.trim() ? clean(html) : "";
+          if (cleaned.replace(/<[^>]*>/g, "").trim() || /<img/i.test(cleaned)) {
+            insertHtml(cleaned);
+          } else {
+            document.execCommand("insertText", false, e.clipboardData.getData("text/plain"));
+            sync();
+          }
         }}
       />
+      {status && <p style={{ margin: "4px 0", fontSize: 13, color: "var(--muted)" }}>{status}</p>}
+      <input
+        ref={fileInput}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onChange={(e) => {
+          void insertImages(Array.from(e.target.files ?? []));
+          e.target.value = "";
+        }}
+      />
+      <style>{`
+        .pdfnote-edit h1, .pdfnote-edit h2, .pdfnote-edit h3, .pdfnote-edit h5, .pdfnote-edit h6 { margin: 6px 0 4px; font-size: 1.2em; font-weight: 700; }
+        .pdfnote-edit p { margin: 0 0 6px; }
+        .pdfnote-edit img { max-width: 100%; height: auto; display: block; margin: 4px 0; border-radius: 6px; }
+        .pdfnote-edit blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--line, #d5dbe3); color: var(--muted, #5b6675); }
+        .pdfnote-edit code { font-family: ui-monospace, monospace; font-size: 0.92em; background: rgba(120,120,120,.15); padding: 0 4px; border-radius: 4px; }
+        .pdfnote-edit pre { margin: 6px 0; padding: 8px; overflow-x: auto; background: rgba(120,120,120,.12); border-radius: 6px; }
+        .pdfnote-edit pre code { background: none; padding: 0; }
+        .pdfnote-edit a { color: var(--accent, #0f766e); text-decoration: underline; }
+        .pdfnote-edit table { border-collapse: collapse; margin: 6px 0; display: block; overflow-x: auto; max-width: 100%; }
+        .pdfnote-edit th, .pdfnote-edit td { border: 1px solid var(--line, #d5dbe3); padding: 4px 8px; text-align: left; vertical-align: top; }
+        .pdfnote-edit th { font-weight: 700; background: rgba(120,120,120,.1); }
+        .pdfnote-edit hr { border: 0; border-top: 1px solid var(--line, #d5dbe3); margin: 8px 0; }
+      `}</style>
       <div className="pdfnote-actions">
         <button type="button" className="pdfnb-btn" onClick={onDelete}>Excluir</button>
         <button type="button" className="pdfnb-btn on" onClick={onClose}>Pronto</button>
