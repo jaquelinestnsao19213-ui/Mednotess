@@ -1,0 +1,13 @@
+/* Mais espaço para escrever: páginas com editor usam mais da largura da tela (tablet e computador). */
+@media (min-width: 900px) {
+  body:has(.tiptap) .shell,
+  body:has(.tiptap) .topbar,
+  body:has(.tiptap) .mainnav { max-width: min(1180px, 100%); }
+  body:has(.tiptap) .shell { padding-left: 28px; padding-right: 28px; }
+}
+
+/* Imagens lado a lado (até 3 ou mais por linha, conforme o tamanho). O Tiptap envolve cada imagem num bloco; aqui ele vira "em linha". */
+.tiptap .react-renderer.node-image:has(> .img-wrap.in-row) { display: inline-block; vertical-align: top; margin-right: 8px; max-width: 100%; }
+.tiptap > .react-renderer.node-image:has(> .img-wrap.in-row) + .react-renderer.node-image:has(> .img-wrap.in-row) { margin-top: 0; }
+.img-wrap.in-row { text-align: left !important; }
+.img-wrap.in-row .img-toolbar { flex-wrap: wrap; max-width: min(380px, calc(100vw - 24px)); }

@@ -8,6 +8,8 @@ import "./media.css";
 import "./attach-picker.css";
 import "./tables.css";
 import "./topics.css";
+import "./pdf-notes.css";
+import "./editor-layout.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",

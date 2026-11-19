@@ -1,0 +1,17 @@
+/* Comentário do PDF: maior, com formatação e tamanho livre */
+.pdfnote-pop.pdfnote-rich { display: flex; flex-direction: column; gap: 6px; padding: 8px; box-sizing: border-box; min-width: 220px; max-width: calc(100vw - 24px); }
+.pdfnote-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.pdfnote-tool { min-width: 36px; height: 34px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); font-size: 0.9rem; line-height: 1; }
+.pdfnote-tool.t-title, .pdfnote-tool.t-bold { font-weight: 800; }
+.pdfnote-tool.t-italic { font-style: italic; }
+.pdfnote-tool.t-mark { background: #fde68a; color: #1b2430; border-color: #e5c84a; }
+.pdfnote-tool-spacer { flex: 1; }
+.pdfnote-edit { flex: 1; min-height: 60px; overflow: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font-size: 1rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; outline: none; -webkit-user-select: text; user-select: text; }
+.pdfnote-edit:focus { border-color: var(--accent); }
+.pdfnote-edit:empty::before { content: attr(data-placeholder); color: var(--muted); }
+.pdfnote-edit h4 { margin: 0 0 4px; font-size: 1.1em; font-weight: 800; line-height: 1.3; }
+.pdfnote-edit ul, .pdfnote-edit ol { margin: 4px 0; padding-left: 1.3em; white-space: normal; }
+.pdfnote-edit b, .pdfnote-edit strong { font-weight: 800; }
+.pdfnote-grip { position: absolute; right: 0; bottom: 0; width: 26px; height: 26px; cursor: nwse-resize; touch-action: none; border-radius: 0 0 10px 0; background: linear-gradient(135deg, transparent 55%, var(--muted) 55%, var(--muted) 62%, transparent 62%, transparent 72%, var(--muted) 72%, var(--muted) 79%, transparent 79%); }
+.pdfnote-grip.left { right: auto; left: 0; cursor: nesw-resize; border-radius: 0 0 0 10px; transform: scaleX(-1); }
+.pdfnote-rich .pdfnote-actions { padding-right: 24px; }
