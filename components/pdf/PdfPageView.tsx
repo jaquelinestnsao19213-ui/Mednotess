@@ -3,6 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { drawItem, drawItems, hitItem } from "./draw";
+import NotePopup from "./NotePopup";
 import {
   opAddItem,
   opRemoveItems,
@@ -298,30 +299,19 @@ function PdfPageView(p: PageProps) {
             💬
           </button>
           {p.openNoteId === note.id && (
-            <div
-              className="pdfnote-pop"
+            <NotePopup
+              key={note.id}
+              id={note.id}
+              text={note.text}
+              anchorRight={note.x > 0.55}
               style={{
                 top: `calc(${note.y * 100}% + 8px)`,
                 ...(note.x > 0.55 ? { right: `${(1 - note.x) * 100}%` } : { left: `${note.x * 100}%` }),
               }}
-            >
-              <textarea
-                autoFocus
-                rows={4}
-                value={note.text}
-                placeholder="Escreva seu comentário…"
-                aria-label="Comentário"
-                onChange={(e) => p.onNoteText(n, note.id, e.target.value)}
-              />
-              <div className="pdfnote-actions">
-                <button type="button" className="pdfnb-btn" onClick={() => p.onNoteDelete(n, note.id)}>
-                  Excluir
-                </button>
-                <button type="button" className="pdfnb-btn on" onClick={() => p.onOpenNote(null)}>
-                  Pronto
-                </button>
-              </div>
-            </div>
+              onText={(text) => p.onNoteText(n, note.id, text)}
+              onDelete={() => p.onNoteDelete(n, note.id)}
+              onDone={() => p.onOpenNote(null)}
+            />
           )}
         </div>
       ))}
