@@ -1,6 +1,6 @@
 import { Node, mergeAttributes } from "@tiptap/core";
 import { ReactNodeViewRenderer } from "@tiptap/react";
-import InkBlockView from "./InkBlockView";
+import InkBlockShell from "./InkBlockShell";
 import { drawItem } from "../pdf/draw";
 import type { Item } from "../pdf/types";
 import { smoothItemCached } from "./ink-smooth";
@@ -137,6 +137,6 @@ export const InkBlock = Node.create({
     ];
   },
   addNodeView() {
-    return ReactNodeViewRenderer(InkBlockView, { stopEvent: () => true });
+    return ReactNodeViewRenderer(InkBlockShell, { stopEvent: () => true });
   },
 });
