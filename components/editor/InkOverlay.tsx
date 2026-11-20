@@ -6,6 +6,7 @@ import { drawItem, hitItem } from "../pdf/draw";
 import { smoothItem, smoothItemCached } from "./ink-smooth";
 import { boundsOf, idOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk } from "./ink-recognize";
+import { tidyItems } from "./ink-tidy";
 
 // Camada de escrita sobre a página inteira. Fica separada do texto (o conteúdo não muda) e é guardada
 // junto com a página na chave "inkLayer". Posições: x e y divididos pela LARGURA da página; y conta a partir do topo.
@@ -50,6 +51,7 @@ export default function InkOverlay({
   const [selIds, setSelIds] = useState<string[]>([]);
   const [smooth, setSmooth] = useState(layer.smooth);
   const [enhance, setEnhance] = useState(false);
+  const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
 
   // Converter escrita em texto digitado
@@ -372,6 +374,18 @@ export default function InkOverlay({
     if (t !== "lasso") setSelection([]);
   };
 
+  // Modo "Organizada": alinha linhas, uniformiza tamanho e espaçamento das palavras (da seleção ou da página toda).
+  // Fica no histórico: o ↶ volta à escrita como estava.
+  const organize = () => {
+    if (!size.w) return;
+    const base = itemsRef.current;
+    const picked = selRef.current;
+    const target = picked.size ? base.filter((it) => picked.has(idOf(it))) : base;
+    const tidied = tidyItems(target, size.w, tidyAmt);
+    const byId = new Map(tidied.map((it) => [idOf(it), it] as const));
+    commit(base.map((it) => byId.get(idOf(it)) ?? it), base);
+  };
+
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
   const convert = async () => {
     if (convBusy) return;
@@ -431,6 +445,7 @@ export default function InkOverlay({
   const palette = tool === "highlighter" ? MARK_COLORS : INK_COLORS;
   const drawing = tool === "pen" || tool === "highlighter";
   const row: React.CSSProperties = { display: "flex", gap: 6, alignItems: "center", overflowX: "auto", padding: "2px 0" };
+  const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
 
   if (!show) return null;
 
@@ -550,24 +565,51 @@ export default function InkOverlay({
             </div>
           )}
           {enhance && (
-            <div role="group" aria-label="Aperfeiçar escrita" style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Mais natural</span>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={5}
-                value={Math.round(smooth * 100)}
-                aria-label="Intensidade da suavização dos traços"
-                onChange={(e) => setSmooth(Number(e.target.value) / 100)}
-                onPointerUp={commitSmooth}
-                onTouchEnd={commitSmooth}
-                onKeyUp={commitSmooth}
-                onBlur={commitSmooth}
-                style={{ flex: 1, minWidth: 80 }}
-              />
-              <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Mais suave</span>
-              <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(smooth * 100)}%</b>
+            <div role="group" aria-label="Aperfeiçar escrita" style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <b style={{ fontSize: 13, minWidth: 64 }}>Suavizar</b>
+                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Natural</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={Math.round(smooth * 100)}
+                  aria-label="Intensidade da suavização dos traços"
+                  onChange={(e) => setSmooth(Number(e.target.value) / 100)}
+                  onPointerUp={commitSmooth}
+                  onTouchEnd={commitSmooth}
+                  onKeyUp={commitSmooth}
+                  onBlur={commitSmooth}
+                  style={{ flex: 1, minWidth: 80 }}
+                />
+                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Suave</span>
+                <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(smooth * 100)}%</b>
+              </div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                <b style={{ fontSize: 13, minWidth: 64 }}>Organizar</b>
+                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Leve</span>
+                <input
+                  type="range"
+                  min={10}
+                  max={100}
+                  step={5}
+                  value={Math.round(tidyAmt * 100)}
+                  aria-label="Intensidade da organização da escrita"
+                  onChange={(e) => setTidyAmt(Number(e.target.value) / 100)}
+                  style={{ flex: 1, minWidth: 80 }}
+                />
+                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Forte</span>
+                <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(tidyAmt * 100)}%</b>
+              </div>
+              <div style={row}>
+                <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={organize}>
+                  {selIds.length ? "Organizar a seleção" : "Organizar a escrita da página"}
+                </button>
+              </div>
+              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                Alinha as linhas, deixa as palavras do mesmo tamanho e com o mesmo espaço, mantendo o seu traço. Não gostou? Toque em ↶.
+              </p>
             </div>
           )}
           {tool === "lasso" && selIds.length > 0 && (
