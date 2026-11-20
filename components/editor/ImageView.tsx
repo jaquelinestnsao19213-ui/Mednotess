@@ -63,8 +63,9 @@ function setSpans(tr: Transaction, positions: number[], span: number | null, typ
 }
 
 // Imagem do caderno. Ao tocar nela aparece a barra de ações (como no Canva):
-// arrastar, subir/descer, separar, ampliar, desenhar e remover. A alça no canto muda o tamanho.
-// Para colocar imagens lado a lado: arraste uma imagem e solte na esquerda ou na direita de outra.
+// arrastar, subir/descer, lado a lado, separar, ampliar, desenhar e remover. A alça no canto muda o tamanho.
+// Para colocar imagens lado a lado: toque em "▥ Lado a lado" (junta com a imagem de cima ou de baixo)
+// ou arraste uma imagem e solte na esquerda ou na direita de outra.
 export default function ImageView({ node, updateAttributes, selected, editor, getPos, deleteNode }: NodeViewProps) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -101,6 +102,36 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   const spot = selected ? where() : null;
   const canUp = !!spot && spot.index > 0;
   const canDown = !!spot && spot.index < spot.count - 1;
+
+  // Imagem logo acima (ou, se não houver, logo abaixo) desta: é com ela que o botão "Lado a lado" junta.
+  function imageNeighbour(): number | null {
+    const at = where();
+    if (!at) return null;
+    const parent = editor.state.doc.resolve(at.pos).parent;
+    const starts: number[] = [];
+    let p = editor.state.doc.resolve(at.pos).start();
+    for (let i = 0; i < parent.childCount; i++) {
+      starts.push(p);
+      p += parent.child(i).nodeSize;
+    }
+    const isImage = (i: number) => i >= 0 && i < parent.childCount && parent.child(i).type === node.type;
+    if (isImage(at.index - 1)) return starts[at.index - 1];
+    if (isImage(at.index + 1)) return starts[at.index + 1];
+    return null;
+  }
+  const neighbour = selected && !span ? imageNeighbour() : null;
+
+  // Junta esta imagem com a vizinha (e com as que já estão na linha dela) e divide a largura igualmente.
+  function joinNeighbour() {
+    const at = where();
+    const target = imageNeighbour();
+    if (!at || target === null) return;
+    const view = editor.view;
+    const row = rowPositions(view, target, at.pos, node.type);
+    const all = [...row, at.pos].sort((a, b) => a - b);
+    const tr = setSpans(view.state.tr, all, spanFor(all.length), node.type);
+    view.dispatch(tr);
+  }
 
   // Troca a imagem de lugar com o bloco vizinho (um clique = um passo).
   function move(dir: -1 | 1) {
@@ -373,7 +404,18 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
             {span ? (
               <button type="button" aria-label="Separar da linha de imagens" title="Separar das imagens ao lado" className="on" onClick={separate}>⊟ Separar</button>
             ) : (
-              <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
+              <>
+                <button
+                  type="button"
+                  aria-label="Colocar lado a lado com a imagem de cima ou de baixo"
+                  title={neighbour === null ? "Coloque outra imagem logo acima ou abaixo desta (use ↑ e ↓)" : "Lado a lado com a imagem vizinha"}
+                  disabled={neighbour === null}
+                  onClick={joinNeighbour}
+                >
+                  ▥ Lado a lado
+                </button>
+                <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
+              </>
             )}
             <button type="button" aria-label="Ampliar imagem" onClick={() => setModal("zoom")}>⤢</button>
             <button type="button" aria-label="Desenhar na imagem" className={strokes.length ? "on" : ""} onClick={() => setModal("draw")}>✎</button>
