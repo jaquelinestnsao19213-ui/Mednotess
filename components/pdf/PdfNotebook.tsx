@@ -16,6 +16,7 @@ import {
   opRemoveNote,
   uid,
   type Note,
+  type NoteClip,
   type Tool,
 } from "./types";
 
@@ -102,6 +103,11 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   const [fingerDraw, setFingerDraw] = useState(toolPrefs.fingerDraw ?? true);
   const [openNote, setOpenNote] = useState<{ page: number; id: string } | null>(null);
 
+  // Comentário copiado (para colar em outro ponto do PDF) e aviso rápido na barra.
+  const [noteClip, setNoteClip] = useState<NoteClip | null>(null);
+  const [pasteMode, setPasteMode] = useState(false);
+  const [toast, setToast] = useState("");
+
   const rootRef = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
@@ -109,6 +115,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   const raf = useRef(0);
   const restored = useRef(false);
   const pendingScroll = useRef<{ left: number; top: number } | null>(null);
+  const toastTimer = useRef(0);
 
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
@@ -122,12 +129,24 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   currentRef.current = current;
   const openRef = useRef(openNote);
   openRef.current = openNote;
+  const clipRef = useRef(noteClip);
+  clipRef.current = noteClip;
+  const pasteRef = useRef(pasteMode);
+  pasteRef.current = pasteMode;
   const fingerAuto = useRef(toolPrefs.fingerDraw === undefined);
 
   const ptrs = useRef<Map<number, Ptr>>(new Map());
   const panRef = useRef<{ id: number; vx: number; vy: number; t: number } | null>(null);
   const pinchRef = useRef<Pinch | null>(null);
   const inertiaRef = useRef(0);
+
+  const flash = useCallback((msg: string) => {
+    setToast(msg);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(""), 2800);
+  }, []);
+
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
   // ---------- Abrir o PDF (só quando o caderno chega perto da tela) ----------
   useEffect(() => {
@@ -439,19 +458,18 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
       if (!hit) return false;
       const page = Number(hit.dataset.pdfpage);
       const r = hit.getBoundingClientRect();
-      const x = clamp((clientX - r.left) / r.width, 0, 1);
-      const y = clamp((clientY - r.top) / r.height, 0, 1);
-      const note: Note = {
-        id: uid(),
-        x: Math.round(x * 10000) / 10000,
-        y: Math.round(y * 10000) / 10000,
-        text: "",
-        color: colors.note,
-      };
+      const x = Math.round(clamp((clientX - r.left) / r.width, 0, 1) * 10000) / 10000;
+      const y = Math.round(clamp((clientY - r.top) / r.height, 0, 1) * 10000) / 10000;
+      // Modo "Colar comentário": cria uma cópia do comentário copiado no ponto tocado.
+      const clip = pasteRef.current ? clipRef.current : null;
+      const note: Note = clip
+        ? { id: uid(), x, y, text: clip.text, html: clip.html, color: clip.color, w: clip.w, h: clip.h, fs: clip.fs }
+        : { id: uid(), x, y, text: "", color: colors.note };
       const a = get(page);
       apply(page, { ...a, notes: [...a.notes, note] });
       record(opAddNote(page, note));
       setOpenNote({ page, id: note.id });
+      if (clip) setPasteMode(false);
       return true;
     },
     [apply, record, get, colors.note]
@@ -483,6 +501,8 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
       if (p.claimed || !p.moved) return;
       const t = toolRef.current;
       if (p.type === "mouse" && t !== "hand" && t !== "note") return;
+      // Selecionando texto com a caneta: arrastar não rola a página.
+      if (p.type === "pen" && t === "select") return;
       const cur = panRef.current;
       if (cur && cur.id !== p.id) return;
       const dt = Math.max(1, e.timeStamp - (cur?.t ?? e.timeStamp - 16));
@@ -614,6 +634,14 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
     [apply, get, record]
   );
 
+  const onCopyNote = useCallback(
+    (clip: NoteClip) => {
+      setNoteClip(clip);
+      flash("Comentário copiado. Use \"Colar comentário\" para colocar em outro ponto.");
+    },
+    [flash]
+  );
+
   // ---------- Barra de ferramentas ----------
   const editable = ann.loaded && !ann.loadError;
   const palette = tool === "highlighter" ? MARK_COLORS : INK_COLORS;
@@ -631,7 +659,33 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
 
   function chooseTool(t: Tool) {
     closeNote();
+    setPasteMode(false);
     setTool(t);
+  }
+
+  // Copia todo o texto da página atual (atalho para quando não quer selecionar pedaço por pedaço).
+  async function copyPageText() {
+    if (!doc) return;
+    try {
+      const page = await doc.getPage(clamp(currentRef.current, 1, Math.max(1, numPages)));
+      const tc = await page.getTextContent();
+      let text = "";
+      for (const it of tc.items) {
+        if ("str" in it) {
+          text += it.str;
+          if (it.hasEOL) text += "\n";
+        }
+      }
+      text = text.trim();
+      if (!text) {
+        flash("Esta página não tem texto selecionável (pode ser uma imagem).");
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      flash(`Texto da página ${currentRef.current} copiado.`);
+    } catch {
+      flash("Não consegui copiar o texto desta página.");
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
@@ -660,6 +714,10 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   if (ann.status === "loading") statusText = "Carregando anotações…";
   else if (ann.status === "saving") statusText = "Salvando…";
   else if (ann.status === "saved") statusText = "Anotações salvas";
+  if (pasteMode) statusText = "Toque na página onde quer colar o comentário";
+  else if (tool === "clip") statusText = "Arraste sobre a imagem que quer copiar";
+  else if (tool === "select") statusText = "Selecione o texto (segure e arraste) e use Copiar";
+  if (toast) statusText = toast;
 
   return (
     <div ref={rootRef} className={full ? "pdfnb full" : "pdfnb"} tabIndex={0} onKeyDown={onKeyDown}>
@@ -719,7 +777,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
             aria-pressed={tool === t.id}
             aria-label={t.label}
             title={t.label}
-            disabled={t.id !== "hand" && !editable}
+            disabled={t.id !== "hand" && t.id !== "select" && t.id !== "clip" && !editable}
             onClick={() => chooseTool(t.id)}
           >
             <span aria-hidden="true">{t.glyph}</span>&nbsp;{t.label}
@@ -759,6 +817,30 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
         <span className="pdfnb-sep" />
         <button type="button" className="pdfnb-btn" aria-label="Desfazer" disabled={!ann.canUndo} onClick={() => reveal(undo())}>↶</button>
         <button type="button" className="pdfnb-btn" aria-label="Refazer" disabled={!ann.canRedo} onClick={() => reveal(redo())}>↷</button>
+        {noteClip && editable && (
+          <button
+            type="button"
+            className={pasteMode ? "pdfnb-btn on" : "pdfnb-btn"}
+            aria-pressed={pasteMode}
+            title="Depois de tocar aqui, toque na página onde quer colar o comentário copiado"
+            onClick={() => {
+              closeNote();
+              if (pasteMode) {
+                setPasteMode(false);
+              } else {
+                setTool("note");
+                setPasteMode(true);
+              }
+            }}
+          >
+            📋 Colar comentário
+          </button>
+        )}
+        {tool === "select" && (
+          <button type="button" className="pdfnb-btn" onClick={() => void copyPageText()} title="Copia todo o texto da página atual">
+            Copiar texto da página
+          </button>
+        )}
         {drawingTool && (
           <button
             type="button"
@@ -826,6 +908,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
                 onOpenNote={onOpenNote}
                 onNoteText={onNoteText}
                 onNoteDelete={onNoteDelete}
+                onCopyNote={onCopyNote}
                 claim={claim}
                 isPinching={isPinching}
               />
