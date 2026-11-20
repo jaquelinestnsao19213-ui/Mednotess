@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Note, NoteClip } from "./types";
 import { extFromFile, mediaErrorMessage, uploadMedia } from "@/lib/media";
 import { looksLikeMarkdown, markdownToHtml } from "@/lib/markdown-paste";
@@ -142,6 +143,7 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
   patchRef.current = onPatch;
   const [size, setSize] = useState({ w: note.w ?? 300, h: note.h ?? 150 });
   const [status, setStatus] = useState<string | null>(null);
+  const [expandedImage, setExpandedImage] = useState<{ src: string; alt: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const savedRange = useRef<Range | null>(null);
   const fs = note.fs ?? 14;
@@ -159,6 +161,16 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
     sel?.addRange(range);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Fecha a imagem ampliada com a tecla Escape.
+  useEffect(() => {
+    if (!expandedImage) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setExpandedImage(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [expandedImage]);
 
   function sync() {
     const el = ed.current;
@@ -358,6 +370,13 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
         onInput={sync}
         onBlur={sync}
         onKeyDown={(e) => e.stopPropagation()}
+        onClick={(event) => {
+          // Clicar em uma imagem do comentário abre a visualização ampliada.
+          const target = event.target;
+          if (target instanceof HTMLImageElement && target.src) {
+            setExpandedImage({ src: target.src, alt: target.alt || "Imagem do comentário" });
+          }
+        }}
         onPaste={(e) => {
           e.preventDefault();
           const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
@@ -379,7 +398,16 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
 
           // Recupera a formatação Markdown quando o HTML recebido pelo navegador vem achatado (comum ao copiar do ChatGPT/Claude).
           if (looksLikeMarkdown(plain) && (!cleaned || !hasRichStructure)) {
-            insertHtml(clean(markdownToHtml(plain)));
+            const markdownDoc = document.createElement("div");
+            markdownDoc.innerHTML = clean(markdownToHtml(plain));
+            // Preserva imagens que chegaram só no HTML da área de transferência (o texto puro não traz imagens).
+            Array.from(probe.querySelectorAll<HTMLImageElement>("img")).forEach((img) => {
+              const src = img.getAttribute("src");
+              if (src && !markdownDoc.querySelector(`img[src="${CSS.escape(src)}"]`)) {
+                markdownDoc.appendChild(img.cloneNode(true));
+              }
+            });
+            insertHtml(markdownDoc.innerHTML);
           } else if (cleaned.replace(/<[^>]*>/g, "").trim() || /<img/i.test(cleaned)) {
             insertHtml(cleaned);
           } else {
@@ -403,7 +431,7 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
       <style>{`
         .pdfnote-edit h1, .pdfnote-edit h2, .pdfnote-edit h3, .pdfnote-edit h5, .pdfnote-edit h6 { margin: 6px 0 4px; font-size: 1.2em; font-weight: 700; }
         .pdfnote-edit p { margin: 0 0 6px; }
-        .pdfnote-edit img { max-width: 100%; height: auto; display: block; margin: 4px 0; border-radius: 6px; }
+        .pdfnote-edit img { max-width: 100%; height: auto; display: block; margin: 4px 0; border-radius: 6px; cursor: zoom-in; }
         .pdfnote-edit blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--line, #d5dbe3); color: var(--muted, #5b6675); }
         .pdfnote-edit code { font-family: ui-monospace, monospace; font-size: 0.92em; background: rgba(120,120,120,.15); padding: 0 4px; border-radius: 4px; }
         .pdfnote-edit pre { margin: 6px 0; padding: 8px; overflow-x: auto; background: rgba(120,120,120,.12); border-radius: 6px; }
@@ -414,6 +442,55 @@ export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onD
         .pdfnote-edit th { font-weight: 700; background: rgba(120,120,120,.1); }
         .pdfnote-edit hr { border: 0; border-top: 1px solid var(--line, #d5dbe3); margin: 8px 0; }
       `}</style>
+      {expandedImage &&
+        createPortal(
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Imagem ampliada"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => setExpandedImage(null)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              zIndex: 10000,
+              background: "rgba(0,0,0,.88)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 20,
+            }}
+          >
+            <button
+              type="button"
+              aria-label="Fechar imagem ampliada"
+              onClick={() => setExpandedImage(null)}
+              style={{
+                position: "absolute",
+                top: 16,
+                right: 16,
+                width: 42,
+                height: 42,
+                border: 0,
+                borderRadius: 999,
+                background: "rgba(255,255,255,.16)",
+                color: "#fff",
+                fontSize: 26,
+                cursor: "pointer",
+              }}
+            >
+              ×
+            </button>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={expandedImage.src}
+              alt={expandedImage.alt}
+              onClick={(event) => event.stopPropagation()}
+              style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 8 }}
+            />
+          </div>,
+          document.body
+        )}
       <div className="pdfnote-actions">
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => void copyAll()}>Copiar</button>
         <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={onDuplicate}>Duplicar</button>
