@@ -88,6 +88,20 @@ export const ImageWithWidth = Image.extend({
                 ? { "data-align": "left" }
                 : {},
       },
+      // Imagem ao lado do texto: fica à esquerda ou à direita e o texto escreve em volta dela. Vazio = imagem normal.
+      wrap: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute("data-wrap");
+          return v === "left" || v === "right" ? v : null;
+        },
+        renderHTML: (attrs: Record<string, unknown>) =>
+          attrs.wrap === "left"
+            ? { "data-wrap": "left", style: "float:left;margin:4px 14px 8px 0;max-width:60%" }
+            : attrs.wrap === "right"
+              ? { "data-wrap": "right", style: "float:right;margin:4px 0 8px 14px;max-width:60%" }
+              : {},
+      },
       // Desenho feito por cima da imagem (coordenadas de 0 a 1). Guardado no bloco; a imagem original não muda.
       strokes: {
         default: null,

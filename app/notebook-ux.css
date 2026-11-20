@@ -14,6 +14,16 @@
 .img-wrap[data-span] .img-box { display: block; width: 100%; }
 .img-toolbar { max-width: 92vw; flex-wrap: wrap; }
 
+/* Imagem ao lado do texto: a imagem fica à esquerda ou à direita e o texto escreve em volta dela */
+.tiptap .node-image[data-wrap] { width: var(--wrapw, 45%); max-width: 60%; margin-top: 4px; margin-bottom: 8px; }
+.tiptap .node-image[data-wrap="left"] { float: left; margin-right: 14px; }
+.tiptap .node-image[data-wrap="right"] { float: right; margin-left: 14px; }
+.img-wrap[data-wrap] .img-box { display: block; width: 100%; }
+.img-wrap[data-wrap] .img-box img { display: block; width: 100%; height: auto; }
+/* Títulos e imagens normais começam abaixo da imagem ao lado do texto */
+.tiptap > h1, .tiptap > h2, .tiptap > h3 { clear: both; }
+.tiptap .node-image:not([data-wrap]):not([data-span]) { clear: both; }
+
 /* Comentário do PDF: editor com formatação, redimensionável */
 .pdfnote-card {
   position: absolute; z-index: 6; box-sizing: border-box; padding: 8px 8px 20px; display: grid; gap: 8px;

@@ -15,6 +15,9 @@ import ImageDrawModal from "./ImageDrawModal";
 // Imagem solta na lateral de outra: fica ao lado dela (esquerda ou direita).
 type Beside = { tpos: number; tnode: PMNode; after: boolean };
 
+// Imagem ao lado do texto: o texto escreve em volta dela.
+type Wrap = "left" | "right" | null;
+
 // Largura de cada imagem numa linha com `count` imagens (2 = 50%, 3 = 33%, 4 = 25%...).
 const spanFor = (count: number): number | null => (count >= 2 ? Math.max(20, Math.floor(100 / count)) : null);
 
@@ -54,18 +57,20 @@ function rowPositions(view: EditorView, tpos: number, skip: number | null, type:
 }
 
 // Define a largura (lado a lado) das imagens nas posições dadas. span = null volta a imagem ao normal.
+// Imagem em linha lado a lado não fica ao mesmo tempo ao lado do texto (wrap = null).
 function setSpans(tr: Transaction, positions: number[], span: number | null, type: NodeType): Transaction {
   for (const p of positions) {
     const n = tr.doc.nodeAt(p);
-    if (n && n.type === type) tr = tr.setNodeMarkup(p, undefined, { ...n.attrs, span, width: null, align: null });
+    if (n && n.type === type) tr = tr.setNodeMarkup(p, undefined, { ...n.attrs, span, width: null, align: null, wrap: null });
   }
   return tr;
 }
 
 // Imagem do caderno. Ao tocar nela aparece a barra de ações (como no Canva):
-// arrastar, subir/descer, lado a lado, separar, ampliar, desenhar e remover. A alça no canto muda o tamanho.
+// arrastar, subir/descer, lado a lado, ao lado do texto, separar, ampliar, desenhar e remover. A alça no canto muda o tamanho.
 // Para colocar imagens lado a lado: toque em "▥ Lado a lado" (junta com a imagem de cima ou de baixo)
 // ou arraste uma imagem e solte na esquerda ou na direita de outra.
+// Para colocar a imagem ao lado do texto: toque em "▤ Texto ao lado" (esquerda, depois direita, depois volta ao normal).
 export default function ImageView({ node, updateAttributes, selected, editor, getPos, deleteNode }: NodeViewProps) {
   const img = useRef<HTMLImageElement>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -74,6 +79,8 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
   const [dragging, setDragging] = useState(false);
   const strokes = useMemo(() => normalizeStrokes(node.attrs.strokes), [node.attrs.strokes]);
   const span = (node.attrs.span as number | null) ?? null;
+  const wrap = ((node.attrs.wrap as Wrap) ?? null) as Wrap;
+  const widthAttr = (node.attrs.width as number | null) ?? null;
 
   // Passa a fração da linha para o bloco externo do editor, que é quem fica "lado a lado".
   useEffect(() => {
@@ -87,6 +94,19 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
       outer.style.removeProperty("--span");
     }
   }, [span]);
+
+  // Passa o lado e a largura para o bloco externo do editor, que é quem fica ao lado do texto.
+  useEffect(() => {
+    const outer = box.current?.closest<HTMLElement>(".node-image");
+    if (!outer) return;
+    if (wrap) {
+      outer.dataset.wrap = wrap;
+      outer.style.setProperty("--wrapw", widthAttr ? `${widthAttr}px` : "45%");
+    } else {
+      delete outer.dataset.wrap;
+      outer.style.removeProperty("--wrapw");
+    }
+  }, [wrap, widthAttr]);
 
   // Se a imagem estiver colada no topo da tela, a barra aparece embaixo dela.
   useEffect(() => {
@@ -119,7 +139,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     if (isImage(at.index + 1)) return starts[at.index + 1];
     return null;
   }
-  const neighbour = selected && !span ? imageNeighbour() : null;
+  const neighbour = selected && !span && !wrap ? imageNeighbour() : null;
 
   // Junta esta imagem com a vizinha (e com as que já estão na linha dela) e divide a largura igualmente.
   function joinNeighbour() {
@@ -322,7 +342,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
       const col = view.dom.getBoundingClientRect();
       const wide = el.offsetWidth > col.width * 0.85;
       const moved = Math.abs(px - start.x) > 40; // só muda o lado se a pessoa realmente puxou para o lado
-      const align: Align | null = !wide && moved && !span ? alignFromX(px, col.left, col.width) : null;
+      const align: Align | null = !wide && moved && !span && !wrap ? alignFromX(px, col.left, col.width) : null;
       if (tr) {
         let out: Transaction = tr;
         if (span && typeof from === "number") {
@@ -354,6 +374,15 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     updateAttributes({ align: order[(order.indexOf(now) + 1) % order.length] });
   }
 
+  // Imagem ao lado do texto: normal → esquerda → direita → normal. O texto passa a escrever em volta dela.
+  function cycleWrap() {
+    const next: Wrap = wrap === "left" ? "right" : wrap === "right" ? null : "left";
+    const col = editor.view.dom.clientWidth || 800;
+    // Imagem larga demais não deixa espaço para o texto: ao encostar no texto, ela passa a ocupar menos da linha.
+    const tooWide = next && widthAttr && widthAttr > col * 0.6;
+    updateAttributes({ wrap: next, span: null, align: null, ...(tooWide ? { width: Math.round(col * 0.45) } : {}) });
+  }
+
   function startResize(e: React.PointerEvent) {
     e.preventDefault();
     e.stopPropagation();
@@ -362,7 +391,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
     const startX = e.clientX;
     const startW = el.offsetWidth;
     const col = editor.view.dom.clientWidth || 800;
-    const maxW = el.parentElement?.parentElement?.offsetWidth ?? 800;
+    const maxW = wrap ? Math.round(col * 0.6) : (el.parentElement?.parentElement?.offsetWidth ?? 800);
     const moveFn = (ev: PointerEvent) => {
       if (span) {
         // Em "lado a lado" o tamanho é uma fração da linha (de 5 em 5%).
@@ -371,7 +400,9 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
         else updateAttributes({ span: Math.max(15, pct), width: null });
         return;
       }
-      const w = Math.round(Math.min(maxW, Math.max(80, startW + (ev.clientX - startX))));
+      // Ao lado do texto, a alça do canto esquerdo puxa para o lado contrário.
+      const dx = wrap === "right" ? startX - ev.clientX : ev.clientX - startX;
+      const w = Math.round(Math.min(maxW, Math.max(80, startW + dx)));
       updateAttributes({ width: w });
     };
     const up = () => {
@@ -389,9 +420,10 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
       className={dragging ? "img-wrap dragging" : "img-wrap"}
       data-selected={selected ? "true" : "false"}
       data-span={span ?? undefined}
-      style={{ textAlign: span ? undefined : ((node.attrs.align as Align | null) ?? undefined) }}
+      data-wrap={wrap ?? undefined}
+      style={{ textAlign: span || wrap ? undefined : ((node.attrs.align as Align | null) ?? undefined) }}
     >
-      <div ref={box} className="img-box" style={{ width: !span && node.attrs.width ? `${node.attrs.width}px` : undefined }}>
+      <div ref={box} className="img-box" style={{ width: !span && !wrap && node.attrs.width ? `${node.attrs.width}px` : undefined }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img ref={img} src={src} alt={node.attrs.alt ?? ""} draggable={false} onPointerDown={startDrag} onDoubleClick={() => setModal("zoom")} />
         {strokes.length > 0 && <StrokeCanvas items={strokes} />}
@@ -403,6 +435,16 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
             <button type="button" aria-label="Mover para baixo" disabled={!canDown} onClick={() => move(1)}>↓</button>
             {span ? (
               <button type="button" aria-label="Separar da linha de imagens" title="Separar das imagens ao lado" className="on" onClick={separate}>⊟ Separar</button>
+            ) : wrap ? (
+              <button
+                type="button"
+                aria-label="Imagem ao lado do texto: tocar para trocar o lado ou voltar ao normal"
+                title="Toque para trocar o lado; no fim volta ao normal"
+                className="on"
+                onClick={cycleWrap}
+              >
+                {wrap === "left" ? "◧ Esquerda" : "Direita ◨"}
+              </button>
             ) : (
               <>
                 <button
@@ -415,6 +457,7 @@ export default function ImageView({ node, updateAttributes, selected, editor, ge
                   ▥ Lado a lado
                 </button>
                 <button type="button" aria-label="Alinhar imagem (esquerda, centro, direita)" onClick={cycleAlign}>{node.attrs.align === "center" ? "↔" : node.attrs.align === "right" ? "⇥" : "⇤"}</button>
+                <button type="button" aria-label="Colocar a imagem ao lado do texto" title="Texto em volta da imagem" onClick={cycleWrap}>▤ Texto ao lado</button>
               </>
             )}
             <button type="button" aria-label="Ampliar imagem" onClick={() => setModal("zoom")}>⤢</button>
