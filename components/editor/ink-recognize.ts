@@ -39,7 +39,11 @@ export function groupIntoLines(items: Item[], w: number): Group[] {
   let big = strokes.filter((s) => !isSmall(s));
   let small = strokes.filter(isSmall);
   if (!big.length) {
-    big = strokes; // só há traços pequenos: trata todos como linha
+    // Só traços pequenos (ponto, vírgula ou acento soltos): sozinhos o reconhecedor devolve lixo e o texto sairia
+    // como um ponto grande flutuando. Eles ficam como estão (ou são colados ao texto vizinho pela conversão automática).
+    // Com vários traços pequenos pode ser letra miúda: aí trata todos como linha.
+    if (strokes.length < 4) return [];
+    big = strokes;
     small = [];
   }
 
@@ -66,7 +70,7 @@ export function groupIntoLines(items: Item[], w: number): Group[] {
         best = i;
       }
     });
-    if (best >= 0 && bestD <= median * 0.9) lines[best].push(s);
+    if (best >= 0 && bestD <= median * 1.2) lines[best].push(s);
   }
 
   return lines
@@ -85,11 +89,23 @@ export function groupIntoLines(items: Item[], w: number): Group[] {
 
 function payload(g: Group, w: number) {
   const pad = 12;
+  // Espaço horizontal a partir do qual um traço novo é tratado como começo de outra palavra.
+  // Os traços não guardam o tempo real; sem uma pausa maior entre palavras o reconhecedor só tem o espaço no papel para separá-las.
+  const wordGap = Math.max(8, (g.bottom - g.top) * 0.3);
   let t = 0;
+  let maxRight = -Infinity;
   const ink = g.items.map((it) => {
     const xs: number[] = [];
     const ys: number[] = [];
     const ts: number[] = [];
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i + 1 < it.pts.length; i += 2) {
+      const px = it.pts[i] * w;
+      if (px < lo) lo = px;
+      if (px > hi) hi = px;
+    }
+    if (maxRight > -Infinity && lo - maxRight > wordGap) t += 450; // pausa antes de uma palavra nova
     for (let i = 0; i + 1 < it.pts.length; i += 2) {
       xs.push(Math.round((it.pts[i] * w - g.left + pad) * 10) / 10);
       ys.push(Math.round((it.pts[i + 1] * w - g.top + pad) * 10) / 10);
@@ -102,6 +118,7 @@ function payload(g: Group, w: number) {
       ts.push(t);
       t += 8;
     }
+    if (hi > maxRight) maxRight = hi;
     t += 150;
     return [xs, ys, ts];
   });
