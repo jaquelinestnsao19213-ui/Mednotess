@@ -30,15 +30,43 @@ export function groupIntoLines(items: Item[], w: number): Group[] {
   });
   if (!strokes.length) return [];
 
-  const heights = strokes.map((s) => s.bottom - s.top).sort((a, b) => a - b);
+  // Pontos, vírgulas e pingos de "i" são traços pequenos que ficam longe do centro da linha. Se entrassem na conta
+  // das linhas, virariam uma "linha" sozinhos e a pontuação se perderia. Por isso as linhas são formadas só pelos
+  // traços maiores, e os pequenos são encaixados depois na linha mais próxima.
+  const sizes = strokes.map((s) => Math.max(s.right - s.left, s.bottom - s.top)).sort((a, b) => a - b);
+  const ref = Math.max(14, sizes[Math.floor((sizes.length - 1) * 0.75)]);
+  const isSmall = (s: Stroke) => Math.max(s.right - s.left, s.bottom - s.top) < ref * 0.35;
+  let big = strokes.filter((s) => !isSmall(s));
+  let small = strokes.filter(isSmall);
+  if (!big.length) {
+    big = strokes; // só há traços pequenos: trata todos como linha
+    small = [];
+  }
+
+  const heights = big.map((s) => s.bottom - s.top).sort((a, b) => a - b);
   const median = Math.max(10, heights[Math.floor(heights.length / 2)]);
 
   // Ordena pelo centro vertical e abre uma linha nova quando há um "salto" grande entre um traço e o seguinte.
-  strokes.sort((a, b) => a.cy - b.cy);
-  const lines: Stroke[][] = [[strokes[0]]];
-  for (let i = 1; i < strokes.length; i++) {
-    if (strokes[i].cy - strokes[i - 1].cy > median * 0.6) lines.push([]);
-    lines[lines.length - 1].push(strokes[i]);
+  big.sort((a, b) => a.cy - b.cy);
+  const lines: Stroke[][] = [[big[0]]];
+  for (let i = 1; i < big.length; i++) {
+    if (big[i].cy - big[i - 1].cy > median * 0.6) lines.push([]);
+    lines[lines.length - 1].push(big[i]);
+  }
+
+  // Encaixa cada traço pequeno na linha mais próxima na vertical. Pingo solto bem longe de qualquer linha fica de fora.
+  const bands = lines.map((ls) => ({ top: Math.min(...ls.map((s) => s.top)), bottom: Math.max(...ls.map((s) => s.bottom)) }));
+  for (const s of small) {
+    let best = -1;
+    let bestD = Infinity;
+    bands.forEach((b, i) => {
+      const d = s.cy < b.top ? b.top - s.cy : s.cy > b.bottom ? s.cy - b.bottom : 0;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    if (best >= 0 && bestD <= median * 0.9) lines[best].push(s);
   }
 
   return lines
