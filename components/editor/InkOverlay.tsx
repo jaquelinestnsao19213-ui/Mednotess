@@ -39,6 +39,7 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
 const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
+const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 
 export default function InkOverlay({
   layer,
@@ -93,6 +94,8 @@ export default function InkOverlay({
   const autoTimerRef = useRef(0);
   const autoBusyRef = useRef(false);
   const runAutoRef = useRef<() => void>(() => undefined);
+  // S Pen sobre a área de escrita (tocando ou pairando): a contagem da pausa só começa quando ela sai.
+  const penHoverRef = useRef(false);
   // Transição da conversão: a letra à mão some aos poucos enquanto o texto aparece.
   const fadeRef = useRef<{ t0: number; gone: Item[]; texts: Set<string> } | null>(null);
   const fadeLoopRef = useRef(0);
@@ -123,8 +126,37 @@ export default function InkOverlay({
   const dprRef = useRef(1);
   const pushTimerRef = useRef(0);
   const lastPushedRef = useRef<LayerItem[] | null>(null);
+  const prefsLoadedRef = useRef(false);
 
   const show = active || layer.items.length > 0;
+
+  // Preferências de conversão (fonte e pausa): lembradas entre cadernos e sessões.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(PREFS_KEY);
+      if (raw) {
+        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown } | null;
+        if (p && typeof p.convFont === "number" && Number.isInteger(p.convFont) && p.convFont >= 0 && p.convFont < CONV_FONTS.length) {
+          setConvFont(p.convFont);
+        }
+        if (p && typeof p.autoDelay === "number" && p.autoDelay >= 2 && p.autoDelay <= 10) {
+          setAutoDelay(Math.round(p.autoDelay));
+        }
+      }
+    } catch {
+      // armazenamento indisponível: segue com os valores padrão
+    }
+    prefsLoadedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!prefsLoadedRef.current) return;
+    try {
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay }));
+    } catch {
+      // armazenamento indisponível: a preferência vale só nesta sessão
+    }
+  }, [convFont, autoDelay]);
 
   // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
   // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
@@ -434,6 +466,7 @@ export default function InkOverlay({
       touchesRef.current.clear();
       pinchRef.current = null;
       panRef.current = null;
+      penHoverRef.current = false;
       clearLive();
       setConvOpen(false);
       setConvText(null);
@@ -485,23 +518,35 @@ export default function InkOverlay({
   };
 
   // Conversão automática: lê a escrita recente, troca os traços por texto na fonte escolhida (um item por linha).
+  // A contagem da pausa só começa quando a S Pen sai da área de escrita: pairando, mesmo parada, ela espera.
   const armAuto = () => {
     window.clearTimeout(autoTimerRef.current);
-    autoTimerRef.current = window.setTimeout(() => runAutoRef.current(), autoDelayRef.current * 1000);
+    autoTimerRef.current = 0;
+    if (penHoverRef.current) return;
+    autoTimerRef.current = window.setTimeout(() => {
+      autoTimerRef.current = 0;
+      if (penHoverRef.current) return; // segunda verificação: a caneta voltou durante a espera
+      runAutoRef.current();
+    }, autoDelayRef.current * 1000);
   };
 
   // "only": converte só estes traços (a linha que ficou para trás, ou o que você mandou converter); sem ele, converte tudo o que está esperando.
+  // O que não for convertido (falha de rede, linha não reconhecida) continua na fila para outra tentativa.
   const runAuto = async (only?: Set<string>) => {
     if (autoBusyRef.current) {
       if (only) only.forEach((id) => pendingRef.current.add(id));
       armAuto();
       return;
     }
-    const ids = only ?? pendingRef.current;
+    const ids = only ? new Set(only) : new Set(pendingRef.current);
     if (!only) pendingRef.current = new Set();
     const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && ids.has(it.id));
     const w = sizeRef.current.w;
-    if (!src.length || !w) return;
+    if (!src.length) return;
+    if (!w) {
+      src.forEach((it) => pendingRef.current.add(it.id));
+      return;
+    }
     autoBusyRef.current = true;
     setAutoMsg("Convertendo…");
     try {
@@ -540,6 +585,10 @@ export default function InkOverlay({
         updated.set(joined.id, joined);
         gone.add(it.id);
       }
+      // Tudo o que não foi convertido continua na fila, disponível para uma nova tentativa.
+      const stillPresent = new Set(itemsRef.current.filter(isInkLike).map((it) => it.id));
+      const remaining = src.filter((it) => !gone.has(it.id) && stillPresent.has(it.id));
+      remaining.forEach((it) => pendingRef.current.add(it.id));
       if (gone.size || fresh.length || updated.size) {
         fadeRef.current = {
           t0: performance.now(),
@@ -550,9 +599,20 @@ export default function InkOverlay({
         commit([...kept, ...fresh], base);
         schedule();
       }
-      setAutoMsg(failed ? `${failed} ${failed === 1 ? "linha ficou" : "linhas ficaram"} como escrita à mão (não reconhecida).` : null);
+      if (remaining.length) {
+        setAutoMsg("Parte da escrita não foi reconhecida. Ela foi preservada para você tentar novamente.");
+      } else if (failed) {
+        setAutoMsg(`${failed} ${failed === 1 ? "linha não foi reconhecida" : "linhas não foram reconhecidas"}.`);
+      } else {
+        setAutoMsg(null);
+      }
     } catch (e) {
-      setAutoMsg(e instanceof Error ? e.message : "Não consegui converter agora.");
+      // Erro de rede ou do serviço: a escrita continua na página e volta para a fila.
+      const stillPresent = new Set(itemsRef.current.filter(isInkLike).map((it) => it.id));
+      src.forEach((it) => {
+        if (stillPresent.has(it.id)) pendingRef.current.add(it.id);
+      });
+      setAutoMsg(e instanceof Error ? `${e.message} Sua escrita foi preservada.` : "Falha na conversão. Sua escrita foi preservada.");
     } finally {
       autoBusyRef.current = false;
     }
@@ -579,6 +639,9 @@ export default function InkOverlay({
     if (!active || !writing || !size.w) return;
     if (e.pointerType === "pen") {
       penSeenRef.current = true;
+      penHoverRef.current = true;
+      window.clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = 0;
       touchesRef.current.clear();
       panRef.current = null;
     }
@@ -621,6 +684,7 @@ export default function InkOverlay({
     pointerRef.current = e.pointerId;
     drawTypeRef.current = e.pointerType;
     window.clearTimeout(autoTimerRef.current); // voltou a escrever: espera a próxima pausa
+    autoTimerRef.current = 0;
     const [x, y] = toPoint(e.clientX, e.clientY);
 
     if (tool === "lasso") {
@@ -682,8 +746,13 @@ export default function InkOverlay({
         return;
       }
     }
-    // Caneta pairando perto da tela: você ainda está escrevendo, então a conversão continua esperando.
-    if (e.pointerType === "pen" && pointerRef.current === null && autoOnRef.current && pendingRef.current.size) armAuto();
+    // Caneta pairando sobre a tela: você ainda está escrevendo, então a conversão só espera
+    // (a contagem começa quando a caneta sair da área, em onPenLeave).
+    if (e.pointerType === "pen" && pointerRef.current === null) {
+      penHoverRef.current = true;
+      window.clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = 0;
+    }
     if (e.pointerId !== pointerRef.current) return;
     e.preventDefault();
     const ne = e.nativeEvent;
@@ -728,6 +797,15 @@ export default function InkOverlay({
     }
   };
 
+  // A S Pen saiu da área de escrita: agora a contagem da pausa pode começar.
+  const onPenLeave = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== "pen") return;
+    // Ainda executando um traço: a caneta não se afastou.
+    if (pointerRef.current === e.pointerId) return;
+    penHoverRef.current = false;
+    if (autoOnRef.current && pendingRef.current.size > 0) armAuto();
+  };
+
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.pointerType === "touch" && touchesRef.current.delete(e.pointerId)) {
       const pin = pinchRef.current;
@@ -745,6 +823,10 @@ export default function InkOverlay({
     }
     if (e.pointerId !== pointerRef.current) return;
     pointerRef.current = null;
+    // Levantou a S Pen, mas ela ainda pode estar pairando: só conta a pausa quando sair da área.
+    if (e.pointerType === "pen") {
+      penHoverRef.current = true;
+    }
 
     if (dragRef.current) {
       const { base } = dragRef.current;
@@ -797,6 +879,42 @@ export default function InkOverlay({
         armAuto();
       }
     }
+  };
+
+  // O navegador ou o aparelho interrompeu o gesto (ex.: palma da mão, rolagem do sistema): o traço incompleto é
+  // descartado em vez de ser salvo como se estivesse pronto.
+  const onCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === "touch" && touchesRef.current.delete(e.pointerId)) {
+      const pin = pinchRef.current;
+      if (pin) {
+        itemsRef.current = pin.base;
+        pinchRef.current = null;
+        schedule();
+      }
+      if (touchesRef.current.size < 2) panRef.current = null;
+      if (e.pointerId !== pointerRef.current) return;
+    }
+    if (e.pointerId !== pointerRef.current) return;
+    pointerRef.current = null;
+    // Restaura qualquer seleção ou borracha interrompida.
+    if (dragRef.current) {
+      itemsRef.current = dragRef.current.base;
+      dragRef.current = null;
+    }
+    if (erasingRef.current && eraseBaseRef.current) {
+      itemsRef.current = eraseBaseRef.current;
+    }
+    erasingRef.current = false;
+    eraseBaseRef.current = null;
+    // Descarta o traço incompleto.
+    draftRef.current = null;
+    lassoRef.current = null;
+    if (e.pointerType === "pen") {
+      penHoverRef.current = false;
+    }
+    clearLive();
+    schedule();
+    if (autoOnRef.current && pendingRef.current.size) armAuto();
   };
 
   const undo = () => {
@@ -940,7 +1058,15 @@ export default function InkOverlay({
 
   const palette = tool === "highlighter" ? MARK_COLORS : INK_COLORS;
   const drawing = tool === "pen" || tool === "highlighter";
-  const row: React.CSSProperties = { display: "flex", gap: 6, alignItems: "center", overflowX: "auto", padding: "2px 0" };
+  const row: React.CSSProperties = {
+    display: "flex",
+    gap: 6,
+    alignItems: "center",
+    overflowX: "auto",
+    padding: "3px 0",
+    scrollbarWidth: "none",
+    flexWrap: "nowrap",
+  };
   const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
 
   if (!show) return null;
@@ -953,7 +1079,8 @@ export default function InkOverlay({
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
-        onPointerCancel={onUp}
+        onPointerCancel={onCancel}
+        onPointerLeave={onPenLeave}
         style={{
           position: "absolute",
           left: 0,
@@ -1000,9 +1127,42 @@ export default function InkOverlay({
             boxShadow: "0 6px 24px rgba(0,0,0,.18)",
             userSelect: "none",
             WebkitUserSelect: "none",
+            maxHeight: "min(48vh, 440px)",
+            overflowY: "auto",
+            overscrollBehavior: "contain",
+            WebkitOverflowScrolling: "touch",
           }}
         >
-          {autoMsg && <p style={{ margin: 0, fontSize: 13, opacity: 0.85 }}>{autoMsg}</p>}
+          {autoMsg && (
+            <div
+              role="status"
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "8px 10px",
+                borderRadius: 9,
+                background: "var(--bg, #f1f5f9)",
+                fontSize: 13,
+              }}
+            >
+              <span>{autoMsg}</span>
+              {autoMsg !== "Convertendo…" && pendingRef.current.size > 0 && (
+                <button
+                  type="button"
+                  style={btn(true)}
+                  onClick={() => {
+                    setAutoMsg("Convertendo…");
+                    void runAuto();
+                  }}
+                >
+                  Tentar novamente
+                </button>
+              )}
+            </div>
+          )}
           {convOpen && (
             <div role="group" aria-label="Converter escrita em texto" style={{ display: "grid", gap: 6 }}>
               {convText === null ? (
