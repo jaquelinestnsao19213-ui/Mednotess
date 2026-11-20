@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
 import { hitItem } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
-import { moveItem, pickedByLasso } from "./ink-geometry";
+import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk } from "./ink-recognize";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
@@ -35,7 +35,8 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
   { name: "Kalam", v: 'Kalam, "Segoe Print", "Bradley Hand", cursive' },
 ];
 
-const AUTO_DELAY_MS = 1600; // pausa sem escrever antes de converter sozinha
+const AUTO_DELAY_MS = 2400; // pausa sem escrever antes de converter sozinha (ao passar para outra linha, converte na hora)
+const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 
 export default function InkOverlay({
@@ -88,6 +89,9 @@ export default function InkOverlay({
   const autoTimerRef = useRef(0);
   const autoBusyRef = useRef(false);
   const runAutoRef = useRef<() => void>(() => undefined);
+  // Transição da conversão: a letra à mão some aos poucos enquanto o texto aparece.
+  const fadeRef = useRef<{ t0: number; gone: Item[]; texts: Set<string> } | null>(null);
+  const fadeLoopRef = useRef(0);
 
   const itemsRef = useRef<LayerItem[]>(layer.items);
   const smoothRef = useRef(smooth);
@@ -196,9 +200,38 @@ export default function InkOverlay({
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
+
+    // Transição da conversão: a escrita à mão some e o texto aparece, em poucos quadros.
+    const fade = fadeRef.current;
+    let k = 1;
+    if (fade) {
+      const t = Math.min(1, (performance.now() - fade.t0) / FADE_MS);
+      k = t * t * (3 - 2 * t);
+      if (t >= 1) fadeRef.current = null;
+      ctx.save();
+      ctx.globalAlpha = 1 - k;
+      for (const g of fade.gone) drawInkItem(ctx, smoothItemCached(g, smooth), w);
+      ctx.restore();
+    }
     for (const it of itemsRef.current) {
-      if (it.kind === "text") drawText(ctx, it, w);
-      else drawInkItem(ctx, smoothItemCached(it, smooth), w);
+      if (it.kind === "text") {
+        if (fade && fade.texts.has(it.id)) {
+          ctx.save();
+          ctx.globalAlpha = k;
+          drawText(ctx, it, w);
+          ctx.restore();
+        } else {
+          drawText(ctx, it, w);
+        }
+      } else {
+        drawInkItem(ctx, smoothItemCached(it, smooth), w);
+      }
+    }
+    if (fadeRef.current && !fadeLoopRef.current) {
+      fadeLoopRef.current = requestAnimationFrame(() => {
+        fadeLoopRef.current = 0;
+        paintRef.current();
+      });
     }
 
     const lasso = lassoRef.current;
@@ -248,6 +281,7 @@ export default function InkOverlay({
     () => () => {
       cancelAnimationFrame(rafRef.current);
       cancelAnimationFrame(liveRafRef.current);
+      cancelAnimationFrame(fadeLoopRef.current);
     },
     []
   );
@@ -415,13 +449,15 @@ export default function InkOverlay({
     autoTimerRef.current = window.setTimeout(() => runAutoRef.current(), AUTO_DELAY_MS);
   };
 
-  const runAuto = async () => {
+  // "only": converte só estes traços (a linha que ficou para trás); sem ele, converte tudo o que está esperando.
+  const runAuto = async (only?: Set<string>) => {
     if (autoBusyRef.current) {
+      if (only) only.forEach((id) => pendingRef.current.add(id));
       armAuto();
       return;
     }
-    const ids = pendingRef.current;
-    pendingRef.current = new Set();
+    const ids = only ?? pendingRef.current;
+    if (!only) pendingRef.current = new Set();
     const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && ids.has(it.id));
     const w = sizeRef.current.w;
     if (!src.length || !w) return;
@@ -433,6 +469,11 @@ export default function InkOverlay({
       const gone = new Set(lines.flatMap((l) => l.ids));
       const texts: TextItem[] = lines.map((l) => textFromLine(l, w, font));
       const base = itemsRef.current;
+      fadeRef.current = {
+        t0: performance.now(),
+        gone: base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id)),
+        texts: new Set(texts.map((t) => t.id)),
+      };
       commit([...base.filter((it) => !gone.has(it.id)), ...texts], base);
       schedule();
       setAutoMsg(failed ? `${failed} ${failed === 1 ? "linha ficou" : "linhas ficaram"} como escrita à mão (não reconhecida).` : null);
@@ -624,6 +665,22 @@ export default function InkOverlay({
       drawFinished(d);
       clearLive();
       if (autoOnRef.current && d.tool === "pen") {
+        // Se este traço começou outra linha, a linha anterior já está pronta e é convertida agora.
+        // Se continua na mesma linha, espera a pausa para não converter no meio da escrita.
+        const before = pendingRef.current;
+        if (before.size) {
+          const ink = itemsRef.current.filter(isInkLike);
+          const pb = boundsOf(ink, before);
+          const nb = boundsOf(ink, new Set([d.id]));
+          if (pb && nb) {
+            const overlap = Math.min(pb[3], nb[3]) - Math.max(pb[1], nb[1]);
+            const minH = Math.min(pb[3] - pb[1], nb[3] - nb[1]);
+            if (overlap < 0.3 * minH) {
+              pendingRef.current = new Set();
+              void runAuto(new Set(before));
+            }
+          }
+        }
         pendingRef.current.add(d.id);
         armAuto();
       }
@@ -635,6 +692,7 @@ export default function InkOverlay({
     if (!prev) return;
     redoRef.current.push(itemsRef.current);
     itemsRef.current = prev;
+    fadeRef.current = null;
     pushNow();
     setSelection([]);
     setTick((t) => t + 1);
@@ -645,6 +703,7 @@ export default function InkOverlay({
     if (!next) return;
     undoRef.current.push(itemsRef.current);
     itemsRef.current = next;
+    fadeRef.current = null;
     pushNow();
     setSelection([]);
     setTick((t) => t + 1);
@@ -865,7 +924,7 @@ export default function InkOverlay({
                   </label>
                   {autoOn && (
                     <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                      Escreva uma linha e faça uma pausa de uns 2 segundos: a letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Desenhos também podem ser convertidos sem querer; ↶ desfaz. Precisa de internet.
+                      Escreva uma linha e faça uma pausa de 2 a 3 segundos, ou comece a escrever na linha de baixo: a letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Desenhos também podem ser convertidos sem querer; ↶ desfaz. Precisa de internet.
                     </p>
                   )}
                   <div style={row}>
