@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
-import { drawItem, hitItem } from "../pdf/draw";
-import { smoothItem, smoothItemCached } from "./ink-smooth";
+import { hitItem } from "../pdf/draw";
+import { smoothItemCached } from "./ink-smooth";
 import { moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk } from "./ink-recognize";
 import { tidyItems } from "./ink-tidy";
+import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
 import { drawText, hitText, isInkLike, loadHandwritingFonts, textFromLine, textInPoly, unionBox, type LayerItem, type TextItem } from "./ink-text";
 
 // Camada de escrita sobre a página inteira. Fica separada do texto (o conteúdo não muda) e é guardada
@@ -93,10 +94,13 @@ export default function InkOverlay({
   smoothRef.current = smooth;
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  const draftRef = useRef<InkItem | null>(null);
+  const draftRef = useRef<PenInk | null>(null);
   const lassoRef = useRef<number[] | null>(null);
   const selRef = useRef<Set<string>>(new Set());
   const dragRef = useRef<{ sx: number; sy: number; base: LayerItem[] } | null>(null);
+  // Dois dedos com o laço: aumenta ou diminui o que está selecionado (gesto de pinça).
+  const touchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ d0: number; base: LayerItem[]; cx: number; cy: number } | null>(null);
   const undoRef = useRef<LayerItem[][]>([]);
   const redoRef = useRef<LayerItem[][]>([]);
   const pointerRef = useRef<number | null>(null);
@@ -194,7 +198,7 @@ export default function InkOverlay({
     ctx.clearRect(0, 0, w, h);
     for (const it of itemsRef.current) {
       if (it.kind === "text") drawText(ctx, it, w);
-      else drawItem(ctx, smoothItemCached(it, smooth), w, w);
+      else drawInkItem(ctx, smoothItemCached(it, smooth), w);
     }
 
     const lasso = lassoRef.current;
@@ -281,6 +285,12 @@ export default function InkOverlay({
       ctx.fill();
       return;
     }
+    // Caneta com pressão (S Pen): cada pedaço do traço sai com a espessura da pressão naquele ponto.
+    const pr = d.pr;
+    if (pr && pr.length === n) {
+      liveDrawnRef.current = strokePressure(ctx, p, pr, w, ctx.lineWidth, liveDrawnRef.current);
+      return;
+    }
     const k = liveDrawnRef.current;
     ctx.beginPath();
     if (k === 0) ctx.moveTo(X(0), Y(0));
@@ -322,7 +332,7 @@ export default function InkOverlay({
     if (!ctx) return;
     const dpr = dprRef.current;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawItem(ctx, smoothItemCached(it, smoothRef.current), w, w);
+    drawInkItem(ctx, smoothItemCached(it, smoothRef.current), w);
   };
 
   // Carrega as fontes manuscritas e redesenha quando ficarem prontas.
@@ -354,6 +364,8 @@ export default function InkOverlay({
       setSelIds([]);
       lassoRef.current = null;
       draftRef.current = null;
+      touchesRef.current.clear();
+      pinchRef.current = null;
       clearLive();
       setConvOpen(false);
       setConvText(null);
@@ -436,7 +448,33 @@ export default function InkOverlay({
 
   const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!active || !writing || !size.w) return;
-    if (e.pointerType === "pen") penSeenRef.current = true;
+    if (e.pointerType === "pen") {
+      penSeenRef.current = true;
+      touchesRef.current.clear();
+    }
+    // Laço com algo selecionado: dois dedos na tela aumentam ou diminuem a seleção (gesto de pinça).
+    // Isso vale mesmo com a S Pen em uso; toques largos (palma da mão) são ignorados.
+    if (e.pointerType === "touch" && tool === "lasso" && selRef.current.size) {
+      if (Math.max(e.width, e.height) <= 60) touchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchesRef.current.size === 2 && !pinchRef.current) {
+        const [a, b] = Array.from(touchesRef.current.values());
+        const d0 = Math.hypot(a.x - b.x, a.y - b.y);
+        const box = unionBox(itemsRef.current, selRef.current, size.w);
+        if (box && d0 > 10) {
+          e.preventDefault();
+          // O primeiro dedo pode ter começado a arrastar: volta ao ponto de partida antes de redimensionar.
+          if (dragRef.current) {
+            itemsRef.current = dragRef.current.base;
+            dragRef.current = null;
+          }
+          lassoRef.current = null;
+          pointerRef.current = null;
+          pinchRef.current = { d0, base: itemsRef.current, cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
+          schedule();
+          return;
+        }
+      }
+    }
     // Com a S Pen em uso, a palma da mão (toque) é ignorada.
     if (penSeenRef.current && e.pointerType === "touch") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -448,7 +486,7 @@ export default function InkOverlay({
 
     if (tool === "lasso") {
       const box = unionBox(itemsRef.current, selRef.current, size.w);
-      const slack = 0.015;
+      const slack = e.pointerType === "touch" ? 0.06 : 0.015; // com o dedo, a área de pegar a seleção é maior
       if (box && x >= box[0] - slack && x <= box[2] + slack && y >= box[1] - slack && y <= box[3] + slack) {
         dragRef.current = { sx: x, sy: y, base: itemsRef.current };
         return;
@@ -466,6 +504,8 @@ export default function InkOverlay({
     }
     const marker = tool === "highlighter";
     clearLive();
+    // Só a caneta (S Pen) guarda a pressão; dedo, mouse e marca-texto continuam com espessura constante.
+    const pr0 = !marker && e.pointerType === "pen" ? [Math.round((e.pressure > 0 ? e.pressure : 0.5) * 100) / 100] : null;
     draftRef.current = {
       id: uid(),
       kind: "ink",
@@ -473,11 +513,26 @@ export default function InkOverlay({
       color: colorFor(marker),
       width: marker ? MARK_WIDTHS[sizeIdx] : PEN_WIDTHS[sizeIdx],
       pts: [x, y],
+      ...(pr0 ? { pr: pr0 } : {}),
     };
     scheduleLive();
   };
 
   const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === "touch" && touchesRef.current.has(e.pointerId)) {
+      touchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const pin = pinchRef.current;
+      if (pin) {
+        e.preventDefault();
+        const [a, b] = Array.from(touchesRef.current.values());
+        if (a && b) {
+          const s = Math.max(0.2, Math.min(6, Math.hypot(a.x - b.x, a.y - b.y) / pin.d0));
+          itemsRef.current = pin.base.map((it) => (selRef.current.has(it.id) ? scaleLayerItem(it, s, pin.cx, pin.cy) : it));
+          schedule();
+        }
+        return;
+      }
+    }
     if (e.pointerId !== pointerRef.current) return;
     e.preventDefault();
     const ne = e.nativeEvent;
@@ -501,7 +556,15 @@ export default function InkOverlay({
         const p = draftRef.current.pts;
         const lx = p[p.length - 2];
         const ly = p[p.length - 1];
-        if (Math.hypot(x - lx, y - ly) * size.w >= 0.6) p.push(x, y);
+        if (Math.hypot(x - lx, y - ly) * size.w >= 0.6) {
+          p.push(x, y);
+          const pr = draftRef.current.pr;
+          if (pr) {
+            // pressão suavizada para a espessura não "tremer"
+            const raw = ev.pressure > 0 ? ev.pressure : 0.5;
+            pr.push(Math.round((pr[pr.length - 1] * 0.6 + raw * 0.4) * 100) / 100);
+          }
+        }
       }
     }
     // Escrevendo perto da borda da tela: a página rola junto.
@@ -515,6 +578,18 @@ export default function InkOverlay({
   };
 
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType === "touch" && touchesRef.current.delete(e.pointerId)) {
+      const pin = pinchRef.current;
+      if (pin) {
+        // Ao soltar um dos dedos, a pinça termina e o novo tamanho entra no histórico (↶ desfaz).
+        if (touchesRef.current.size < 2) {
+          pinchRef.current = null;
+          if (pin.base !== itemsRef.current) commit(itemsRef.current, pin.base);
+          schedule();
+        }
+        return;
+      }
+    }
     if (e.pointerId !== pointerRef.current) return;
     pointerRef.current = null;
 
@@ -920,7 +995,7 @@ export default function InkOverlay({
             <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
             <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
-            <button type="button" aria-label="Laço: selecionar, mover e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+            <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
             <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
             <button
               type="button"
