@@ -45,3 +45,54 @@
   border-radius: 0 0 10px 0;
   background: linear-gradient(135deg, transparent 52%, var(--muted) 52%, var(--muted) 60%, transparent 60%, transparent 72%, var(--muted) 72%, var(--muted) 80%, transparent 80%);
 }
+
+/* Barra de ferramentas compacta do leitor PDF */
+.pdfnb-tools-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.pdfnb-tools-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  flex-wrap: wrap;
+}
+
+.pdfnb-tool-current {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.pdfnb-tools-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pdfnb-tools-wrap .pdfnb-bar {
+  border: 0;
+  padding: 6px 0;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 600px) {
+  .pdfnb-tools-wrap {
+    padding: 5px 8px;
+  }
+
+  .pdfnb-tools-head {
+    min-height: 40px;
+  }
+
+  .pdfnb-tools-wrap .pdfnb-bar {
+    gap: 5px;
+  }
+}
