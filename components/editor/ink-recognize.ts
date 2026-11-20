@@ -3,7 +3,7 @@ import type { InkItem, Item } from "../pdf/types";
 // Converte a escrita à mão (traços da caneta) em texto, uma linha por vez.
 // Os traços são agrupados em linhas pela posição vertical e enviados a /api/handwriting.
 
-export type Recognized = { text: string; ids: string[]; left: number; top: number };
+export type Recognized = { text: string; ids: string[]; left: number; top: number; right: number; bottom: number; color: string };
 
 type Stroke = { item: InkItem; order: number; left: number; right: number; top: number; bottom: number; cy: number };
 type Group = { items: InkItem[]; left: number; right: number; top: number; bottom: number };
@@ -114,7 +114,7 @@ export async function recognizeInk(items: Item[], pageW: number): Promise<{ line
       failed += 1;
       return;
     }
-    lines.push({ text, ids: g.items.map((it) => it.id), left: g.left, top: g.top });
+    lines.push({ text, ids: g.items.map((it) => it.id), left: g.left, top: g.top, right: g.right, bottom: g.bottom, color: g.items[0].color });
   });
   if (!lines.length) {
     throw new Error("O reconhecedor gratuito do Google não respondeu agora. Tente de novo em instantes.");
