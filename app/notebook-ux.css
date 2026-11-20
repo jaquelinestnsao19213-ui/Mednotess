@@ -96,3 +96,74 @@
     gap: 5px;
   }
 }
+
+/* Experiência aprimorada dos comentários no PDF */
+/* (largura/altura continuam controladas pelo redimensionamento e pelo botão ⤢; o rodapé de 20px é do puxador de tamanho) */
+
+.pdfnote-card {
+  max-width: calc(100vw - 24px);
+  gap: 10px;
+  border-radius: 14px;
+  box-shadow: 0 12px 36px rgb(0 0 0 / 0.20);
+}
+
+.pdfnote-tools {
+  align-items: center;
+  gap: 5px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pdfnote-tools .pdfnb-btn {
+  min-height: 34px;
+  border-radius: 7px;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.pdfnote-edit {
+  padding: 12px;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.pdfnote-edit:empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.pdfnote-edit img {
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.pdfnote-edit:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.pdfnote-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 5px;
+}
+
+@media (max-width: 600px) {
+  .pdfnote-card {
+    max-width: calc(100vw - 20px);
+  }
+
+  .pdfnote-tools {
+    gap: 4px;
+  }
+
+  .pdfnote-edit {
+    font-size: 15px;
+  }
+
+  .pdfnote-actions .pdfnb-btn {
+    min-height: 38px;
+  }
+}
