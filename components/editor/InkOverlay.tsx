@@ -295,12 +295,14 @@ export default function InkOverlay({
   };
 
   // Desenha só o pedaço novo do traço em andamento (curvas suaves entre os pontos médios), sem apagar nada.
+  // Obs.: sem a opção "desynchronized" do canvas. Em páginas compridas alguns tablets pintavam a camada inteira
+  // de preto ao escrever; o traço continua fluido porque só o pedaço novo é desenhado.
   const drawLive = () => {
     const d = draftRef.current;
     const canvas = liveRef.current;
     const w = sizeRef.current.w;
     if (!d || !canvas || !w) return;
-    const ctx = canvas.getContext("2d", { desynchronized: true });
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const dpr = dprRef.current;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -351,7 +353,7 @@ export default function InkOverlay({
     const canvas = liveRef.current;
     liveDrawnRef.current = 0;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d", { desynchronized: true });
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
