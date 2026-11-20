@@ -98,6 +98,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   const [full, setFull] = useState(false);
 
   const [tool, setTool] = useState<Tool>("hand");
+  const [toolsExpanded, setToolsExpanded] = useState(false);
   const [colors, setColors] = useState(toolPrefs.colors);
   const [sizeIdx, setSizeIdx] = useState(toolPrefs.sizeIdx);
   const [fingerDraw, setFingerDraw] = useState(toolPrefs.fingerDraw ?? true);
@@ -421,15 +422,30 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
     pinchRef.current = null;
     const sc = scroller.current;
     const el = inner.current;
+
     if (!pn || !sc) return;
-    if (Math.abs(pn.r - 1) < 0.003) {
-      if (el) el.style.transform = "";
-      sc.scrollLeft = pn.sl;
-      sc.scrollTop = pn.st;
+
+    // Permite deslocar o PDF com dois dedos mesmo sem alterar o zoom.
+    const z1 = clamp(pn.z0 * pn.r, MIN_ZOOM, MAX_ZOOM);
+    const nextLeft = pn.r * pn.ax - pn.mx;
+    const nextTop = pn.r * pn.ay - pn.my;
+
+    if (Math.abs(z1 - pn.z0) < 0.003) {
+      if (el) {
+        el.style.transform = "";
+        el.style.transformOrigin = "";
+      }
+
+      sc.scrollLeft = nextLeft;
+      sc.scrollTop = nextTop;
       return;
     }
-    const z1 = pn.z0 * pn.r;
-    pendingScroll.current = { left: pn.r * pn.ax - pn.mx, top: pn.r * pn.ay - pn.my };
+
+    pendingScroll.current = {
+      left: nextLeft,
+      top: nextTop,
+    };
+
     zoomRef.current = z1;
     setZoom(z1);
   }, []);
@@ -650,6 +666,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   const widths = tool === "highlighter" ? MARK_WIDTHS : PEN_WIDTHS;
   const showSize = tool === "pen" || tool === "highlighter" || tool === "circle";
   const drawingTool = tool === "pen" || tool === "highlighter" || tool === "circle" || tool === "eraser";
+  const activeTool = TOOLS.find((t) => t.id === tool);
 
   function reveal(pg: number | null) {
     if (pg === null) return;
@@ -768,100 +785,130 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
         )}
       </div>
 
-      <div className="pdfnb-bar" role="toolbar" aria-label="Ferramentas de anotação">
-        {TOOLS.map((t) => (
+      <div className="pdfnb-tools-wrap">
+        <div className="pdfnb-tools-head">
+          <span className="pdfnb-tool-current">
+            {activeTool?.glyph} {activeTool?.label ?? "Navegar"}
+          </span>
+
+          {!toolsExpanded && (
+            <span className="pdfnb-status" role="status">
+              {ann.status === "error" && !ann.loadError ? (
+                <button type="button" className="pdfnb-btn" onClick={ann.retrySave}>Erro ao salvar — tentar de novo</button>
+              ) : (
+                statusText
+              )}
+            </span>
+          )}
+
           <button
             type="button"
-            key={t.id}
-            className={tool === t.id ? "pdfnb-btn on" : "pdfnb-btn"}
-            aria-pressed={tool === t.id}
-            aria-label={t.label}
-            title={t.label}
-            disabled={t.id !== "hand" && t.id !== "select" && t.id !== "clip" && !editable}
-            onClick={() => chooseTool(t.id)}
+            className="pdfnb-btn pdfnb-tools-toggle"
+            aria-expanded={toolsExpanded}
+            onClick={() => setToolsExpanded((v) => !v)}
           >
-            <span aria-hidden="true">{t.glyph}</span>&nbsp;{t.label}
+            {toolsExpanded ? "Recolher ferramentas" : "Ferramentas"}
+            <span aria-hidden="true">{toolsExpanded ? "⌃" : "⌄"}</span>
           </button>
-        ))}
-        {colorKey && (
-          <>
-            <span className="pdfnb-sep" />
-            {palette.map((c) => (
+        </div>
+
+        {toolsExpanded && (
+          <div className="pdfnb-bar" role="toolbar" aria-label="Ferramentas de anotação">
+            {TOOLS.map((t) => (
               <button
                 type="button"
-                key={c}
-                className={c === color ? "swatch picked" : "swatch"}
-                style={{ background: c }}
-                aria-label={`Cor ${c}`}
-                onClick={() => setColors((prev) => ({ ...prev, [colorKey]: c }))}
-              />
-            ))}
-          </>
-        )}
-        {showSize && (
-          <>
-            <span className="pdfnb-sep" />
-            {widths.map((w, i) => (
-              <button
-                type="button"
-                key={i}
-                className={i === sizeIdx ? "pdfnb-btn on" : "pdfnb-btn"}
-                aria-label={["Traço fino", "Traço médio", "Traço grosso"][i]}
-                onClick={() => setSizeIdx(i)}
+                key={t.id}
+                className={tool === t.id ? "pdfnb-btn on" : "pdfnb-btn"}
+                aria-pressed={tool === t.id}
+                aria-label={t.label}
+                title={t.label}
+                disabled={t.id !== "hand" && t.id !== "select" && t.id !== "clip" && !editable}
+                onClick={() => chooseTool(t.id)}
               >
-                <span className="pdfnb-dot" style={{ width: 4 + i * 4, height: 4 + i * 4 }} />
+                <span aria-hidden="true">{t.glyph}</span>&nbsp;{t.label}
               </button>
             ))}
-          </>
+            {colorKey && (
+              <>
+                <span className="pdfnb-sep" />
+                {palette.map((c) => (
+                  <button
+                    type="button"
+                    key={c}
+                    className={c === color ? "swatch picked" : "swatch"}
+                    style={{ background: c }}
+                    aria-label={`Cor ${c}`}
+                    onClick={() => setColors((prev) => ({ ...prev, [colorKey]: c }))}
+                  />
+                ))}
+              </>
+            )}
+            {showSize && (
+              <>
+                <span className="pdfnb-sep" />
+                {widths.map((w, i) => (
+                  <button
+                    type="button"
+                    key={i}
+                    className={i === sizeIdx ? "pdfnb-btn on" : "pdfnb-btn"}
+                    aria-label={["Traço fino", "Traço médio", "Traço grosso"][i]}
+                    onClick={() => setSizeIdx(i)}
+                  >
+                    <span className="pdfnb-dot" style={{ width: 4 + i * 4, height: 4 + i * 4 }} />
+                  </button>
+                ))}
+              </>
+            )}
+            <span className="pdfnb-sep" />
+            <button type="button" className="pdfnb-btn" aria-label="Desfazer" disabled={!ann.canUndo} onClick={() => reveal(undo())}>↶</button>
+            <button type="button" className="pdfnb-btn" aria-label="Refazer" disabled={!ann.canRedo} onClick={() => reveal(redo())}>↷</button>
+            {noteClip && editable && (
+              <button
+                type="button"
+                className={pasteMode ? "pdfnb-btn on" : "pdfnb-btn"}
+                aria-pressed={pasteMode}
+                title="Depois de tocar aqui, toque na página onde quer colar o comentário copiado"
+                onClick={() => {
+                  closeNote();
+                  if (pasteMode) {
+                    setPasteMode(false);
+                  } else {
+                    setTool("note");
+                    setPasteMode(true);
+                  }
+                }}
+              >
+                📋 Colar comentário
+              </button>
+            )}
+            {tool === "select" && (
+              <button type="button" className="pdfnb-btn" onClick={() => void copyPageText()} title="Copia todo o texto da página atual">
+                Copiar texto da página
+              </button>
+            )}
+            {drawingTool && (
+              <button
+                type="button"
+                className={fingerDraw ? "pdfnb-btn on" : "pdfnb-btn"}
+                aria-pressed={fingerDraw}
+                title="Com a opção desligada, só a caneta risca; o dedo rola e dá zoom."
+                onClick={() => {
+                  fingerAuto.current = false;
+                  setFingerDraw((v) => !v);
+                }}
+              >
+                {fingerDraw ? "Dedo risca" : "Só caneta"}
+              </button>
+            )}
+            <span className="pdfnb-status" role="status">
+              {ann.status === "error" && !ann.loadError ? (
+                <button type="button" className="pdfnb-btn" onClick={ann.retrySave}>Erro ao salvar — tentar de novo</button>
+              ) : (
+                statusText
+              )}
+            </span>
+          </div>
         )}
-        <span className="pdfnb-sep" />
-        <button type="button" className="pdfnb-btn" aria-label="Desfazer" disabled={!ann.canUndo} onClick={() => reveal(undo())}>↶</button>
-        <button type="button" className="pdfnb-btn" aria-label="Refazer" disabled={!ann.canRedo} onClick={() => reveal(redo())}>↷</button>
-        {noteClip && editable && (
-          <button
-            type="button"
-            className={pasteMode ? "pdfnb-btn on" : "pdfnb-btn"}
-            aria-pressed={pasteMode}
-            title="Depois de tocar aqui, toque na página onde quer colar o comentário copiado"
-            onClick={() => {
-              closeNote();
-              if (pasteMode) {
-                setPasteMode(false);
-              } else {
-                setTool("note");
-                setPasteMode(true);
-              }
-            }}
-          >
-            📋 Colar comentário
-          </button>
-        )}
-        {tool === "select" && (
-          <button type="button" className="pdfnb-btn" onClick={() => void copyPageText()} title="Copia todo o texto da página atual">
-            Copiar texto da página
-          </button>
-        )}
-        {drawingTool && (
-          <button
-            type="button"
-            className={fingerDraw ? "pdfnb-btn on" : "pdfnb-btn"}
-            aria-pressed={fingerDraw}
-            title="Com a opção desligada, só a caneta risca; o dedo rola e dá zoom."
-            onClick={() => {
-              fingerAuto.current = false;
-              setFingerDraw((v) => !v);
-            }}
-          >
-            {fingerDraw ? "Dedo risca" : "Só caneta"}
-          </button>
-        )}
-        <span className="pdfnb-status" role="status">
-          {ann.status === "error" && !ann.loadError ? (
-            <button type="button" className="pdfnb-btn" onClick={ann.retrySave}>Erro ao salvar — tentar de novo</button>
-          ) : (
-            statusText
-          )}
-        </span>
       </div>
 
       {ann.loadError && (
