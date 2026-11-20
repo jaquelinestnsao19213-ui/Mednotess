@@ -35,6 +35,7 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
 ];
 
 const AUTO_DELAY_MS = 1600; // pausa sem escrever antes de converter sozinha
+const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 
 export default function InkOverlay({
   layer,
@@ -47,7 +48,10 @@ export default function InkOverlay({
   active: boolean;
   onClose: () => void;
 }) {
+  // Duas camadas de desenho: "canvasRef" guarda tudo o que já está pronto; "liveRef" recebe só o traço
+  // que está sendo escrito (desenhado aos poucos, sem redesenhar a página inteira a cada movimento).
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const liveRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [tool, setTool] = useState<Tool>("pen");
   const [colorIdx, setColorIdx] = useState(0); // -1 = cor personalizada
@@ -87,6 +91,8 @@ export default function InkOverlay({
   const itemsRef = useRef<LayerItem[]>(layer.items);
   const smoothRef = useRef(smooth);
   smoothRef.current = smooth;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
   const draftRef = useRef<InkItem | null>(null);
   const lassoRef = useRef<number[] | null>(null);
   const selRef = useRef<Set<string>>(new Set());
@@ -98,12 +104,54 @@ export default function InkOverlay({
   const eraseBaseRef = useRef<LayerItem[] | null>(null);
   const penSeenRef = useRef(false);
   const rafRef = useRef(0);
+  const liveRafRef = useRef(0);
+  const liveDrawnRef = useRef(0); // até qual ponto do traço atual já foi desenhado na camada "viva"
+  const dprRef = useRef(1);
+  const pushTimerRef = useRef(0);
+  const lastPushedRef = useRef<LayerItem[] | null>(null);
 
   const show = active || layer.items.length > 0;
 
+  // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
+  // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
+  const pushNow = () => {
+    window.clearTimeout(pushTimerRef.current);
+    pushTimerRef.current = 0;
+    lastPushedRef.current = itemsRef.current;
+    onChangeRef.current({ items: itemsRef.current, smooth: smoothRef.current });
+  };
+  const queuePush = () => {
+    window.clearTimeout(pushTimerRef.current);
+    pushTimerRef.current = window.setTimeout(() => {
+      pushTimerRef.current = 0;
+      pushNow();
+    }, PUSH_DELAY_MS);
+  };
+  const flushPush = () => {
+    if (pushTimerRef.current) pushNow();
+  };
+
   useEffect(() => {
-    itemsRef.current = layer.items;
-  }, [layer.items]);
+    const flush = () => {
+      if (pushTimerRef.current) pushNow();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      try {
+        flush();
+      } catch {
+        // o editor já pode ter sido fechado
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     setSmooth(layer.smooth);
   }, [layer.smooth]);
@@ -119,6 +167,7 @@ export default function InkOverlay({
     return () => ro?.disconnect();
   }, [show]);
 
+  // Redesenha tudo o que já está pronto (traços, textos, laço e seleção). O traço em andamento fica na camada "viva".
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     const { w, h } = size;
@@ -126,11 +175,18 @@ export default function InkOverlay({
     // Páginas muito compridas usam menos pixels por ponto para não estourar a memória do navegador.
     let dpr = Math.min(3, window.devicePixelRatio || 1);
     dpr = Math.max(0.5, Math.min(dpr, Math.sqrt(16000000 / (w * h)), 16000 / h));
+    dprRef.current = dpr;
     const cw = Math.max(1, Math.round(w * dpr));
     const ch = Math.max(1, Math.round(h * dpr));
     if (canvas.width !== cw || canvas.height !== ch) {
       canvas.width = cw;
       canvas.height = ch;
+    }
+    const live = liveRef.current;
+    if (live && (live.width !== cw || live.height !== ch)) {
+      live.width = cw;
+      live.height = ch;
+      liveDrawnRef.current = 0; // redimensionar apaga a camada viva: o traço atual é refeito do começo
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -140,7 +196,6 @@ export default function InkOverlay({
       if (it.kind === "text") drawText(ctx, it, w);
       else drawItem(ctx, smoothItemCached(it, smooth), w, w);
     }
-    if (draftRef.current) drawItem(ctx, smoothItem(draftRef.current, smooth), w, w);
 
     const lasso = lassoRef.current;
     if (lasso && lasso.length >= 4) {
@@ -170,11 +225,28 @@ export default function InkOverlay({
     }
   }, [size, smooth]);
 
+  const paintRef = useRef(paint);
+  paintRef.current = paint;
+
   useEffect(() => {
     paint();
-  }, [paint, layer.items]);
+  }, [paint]);
 
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+  // Mudanças vindas de fora (desfazer do editor, outra aba) atualizam o desenho.
+  // O que nós mesmos enviamos ao editor não precisa ser redesenhado.
+  useEffect(() => {
+    if (layer.items === lastPushedRef.current || pushTimerRef.current) return;
+    itemsRef.current = layer.items;
+    paintRef.current();
+  }, [layer.items]);
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(rafRef.current);
+      cancelAnimationFrame(liveRafRef.current);
+    },
+    []
+  );
 
   const schedule = () => {
     if (rafRef.current) return;
@@ -182,6 +254,75 @@ export default function InkOverlay({
       rafRef.current = 0;
       paint();
     });
+  };
+
+  // Desenha só o pedaço novo do traço em andamento (curvas suaves entre os pontos médios), sem apagar nada.
+  const drawLive = () => {
+    const d = draftRef.current;
+    const canvas = liveRef.current;
+    const w = sizeRef.current.w;
+    if (!d || !canvas || !w) return;
+    const ctx = canvas.getContext("2d", { desynchronized: true });
+    if (!ctx) return;
+    const dpr = dprRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = d.color;
+    ctx.fillStyle = d.color;
+    ctx.lineWidth = Math.max(1, d.width * w);
+    const p = d.pts;
+    const n = p.length / 2;
+    const X = (i: number) => p[2 * i] * w;
+    const Y = (i: number) => p[2 * i + 1] * w;
+    if (n === 1) {
+      ctx.beginPath();
+      ctx.arc(X(0), Y(0), ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    const k = liveDrawnRef.current;
+    ctx.beginPath();
+    if (k === 0) ctx.moveTo(X(0), Y(0));
+    else ctx.moveTo((X(k) + X(k + 1)) / 2, (Y(k) + Y(k + 1)) / 2);
+    let last = k;
+    for (let i = k + 1; i <= n - 2; i++) {
+      ctx.quadraticCurveTo(X(i), Y(i), (X(i) + X(i + 1)) / 2, (Y(i) + Y(i + 1)) / 2);
+      last = i;
+    }
+    ctx.lineTo(X(n - 1), Y(n - 1)); // ponta do traço sempre acompanha a caneta
+    ctx.stroke();
+    liveDrawnRef.current = last;
+  };
+
+  const scheduleLive = () => {
+    if (liveRafRef.current) return;
+    liveRafRef.current = requestAnimationFrame(() => {
+      liveRafRef.current = 0;
+      drawLive();
+    });
+  };
+
+  const clearLive = () => {
+    const canvas = liveRef.current;
+    liveDrawnRef.current = 0;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d", { desynchronized: true });
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  };
+
+  // Ao levantar a caneta: o traço pronto é desenhado direto na camada principal (sem redesenhar a página).
+  const drawFinished = (it: Item) => {
+    const canvas = canvasRef.current;
+    const w = sizeRef.current.w;
+    if (!canvas || !w) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = dprRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawItem(ctx, smoothItemCached(it, smoothRef.current), w, w);
   };
 
   // Carrega as fontes manuscritas e redesenha quando ficarem prontas.
@@ -208,16 +349,19 @@ export default function InkOverlay({
       setWriting(true);
       penSeenRef.current = false;
     } else {
+      flushPush();
       selRef.current = new Set();
       setSelIds([]);
       lassoRef.current = null;
       draftRef.current = null;
+      clearLive();
       setConvOpen(false);
       setConvText(null);
       setConvErr(null);
       setAutoMsg(null);
       window.clearTimeout(autoTimerRef.current);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
@@ -227,7 +371,7 @@ export default function InkOverlay({
     if (undoRef.current.length > 60) undoRef.current.shift();
     redoRef.current = [];
     itemsRef.current = next;
-    onChange({ items: next, smooth: smoothRef.current });
+    queuePush();
     setTick((t) => t + 1);
   };
 
@@ -278,6 +422,7 @@ export default function InkOverlay({
       const texts: TextItem[] = lines.map((l) => textFromLine(l, w, font));
       const base = itemsRef.current;
       commit([...base.filter((it) => !gone.has(it.id)), ...texts], base);
+      schedule();
       setAutoMsg(failed ? `${failed} ${failed === 1 ? "linha ficou" : "linhas ficaram"} como escrita à mão (não reconhecida).` : null);
     } catch (e) {
       setAutoMsg(e instanceof Error ? e.message : "Não consegui converter agora.");
@@ -320,6 +465,7 @@ export default function InkOverlay({
       return;
     }
     const marker = tool === "highlighter";
+    clearLive();
     draftRef.current = {
       id: uid(),
       kind: "ink",
@@ -328,7 +474,7 @@ export default function InkOverlay({
       width: marker ? MARK_WIDTHS[sizeIdx] : PEN_WIDTHS[sizeIdx],
       pts: [x, y],
     };
-    schedule();
+    scheduleLive();
   };
 
   const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -362,8 +508,10 @@ export default function InkOverlay({
     if (draftRef.current) {
       if (e.clientY > window.innerHeight - 150) window.scrollBy(0, 14);
       else if (e.clientY < 50) window.scrollBy(0, -14);
+      scheduleLive();
+    } else {
+      schedule();
     }
-    schedule();
   };
 
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -374,6 +522,7 @@ export default function InkOverlay({
       const { base } = dragRef.current;
       dragRef.current = null;
       if (base !== itemsRef.current) commit(itemsRef.current, base);
+      schedule();
       return;
     }
     if (lassoRef.current) {
@@ -397,6 +546,8 @@ export default function InkOverlay({
     draftRef.current = null;
     if (d) {
       commit([...itemsRef.current, d], itemsRef.current);
+      drawFinished(d);
+      clearLive();
       if (autoOnRef.current && d.tool === "pen") {
         pendingRef.current.add(d.id);
         armAuto();
@@ -409,7 +560,7 @@ export default function InkOverlay({
     if (!prev) return;
     redoRef.current.push(itemsRef.current);
     itemsRef.current = prev;
-    onChange({ items: prev, smooth: smoothRef.current });
+    pushNow();
     setSelection([]);
     setTick((t) => t + 1);
   };
@@ -419,7 +570,7 @@ export default function InkOverlay({
     if (!next) return;
     undoRef.current.push(itemsRef.current);
     itemsRef.current = next;
-    onChange({ items: next, smooth: smoothRef.current });
+    pushNow();
     setSelection([]);
     setTick((t) => t + 1);
   };
@@ -457,10 +608,11 @@ export default function InkOverlay({
       }),
       base
     );
+    schedule();
   };
 
   const commitSmooth = () => {
-    if (Math.abs(smoothRef.current - layer.smooth) > 0.001) onChange({ items: itemsRef.current, smooth: smoothRef.current });
+    if (Math.abs(smoothRef.current - layer.smooth) > 0.001) pushNow();
   };
 
   const pickTool = (t: Tool) => {
@@ -479,6 +631,7 @@ export default function InkOverlay({
     const tidied = tidyItems(target, size.w, tidyAmt);
     const byId = new Map(tidied.map((it) => [it.id, it] as const));
     commit(base.map((it): LayerItem => (it.kind === "text" ? it : (byId.get(it.id) ?? it))), base);
+    schedule();
   };
 
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
@@ -519,6 +672,7 @@ export default function InkOverlay({
       const base = itemsRef.current;
       commit(base.filter((it) => !ids.has(it.id)), base);
       setSelection([]);
+      schedule();
     }
     setConvText(null);
     setConvErr(null);
@@ -564,6 +718,21 @@ export default function InkOverlay({
           pointerEvents: active && writing ? "auto" : "none",
           touchAction: active && writing ? "none" : "auto",
           cursor: active && writing ? "crosshair" : "default",
+        }}
+      />
+      {/* Camada só para o traço que está sendo escrito (o marca-texto fica translúcido aqui, sem escurecer onde se cruza). */}
+      <canvas
+        ref={liveRef}
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: "100%",
+          height: "100%",
+          zIndex: 6,
+          pointerEvents: "none",
+          opacity: tool === "highlighter" ? 0.4 : 1,
         }}
       />
       {active && (
@@ -768,7 +937,17 @@ export default function InkOverlay({
             <button type="button" aria-label="Desfazer" disabled={!undoRef.current.length} style={btn(false, !undoRef.current.length)} onClick={undo}>↶</button>
             <button type="button" aria-label="Refazer" disabled={!redoRef.current.length} style={btn(false, !redoRef.current.length)} onClick={redo}>↷</button>
             <button type="button" aria-label="Apagar toda a escrita sobre a página" style={btn()} onClick={clearAll}>Limpar</button>
-            <button type="button" aria-label="Concluir e voltar a editar o texto" style={{ ...btn(), fontWeight: 700 }} onClick={onClose}>Concluir</button>
+            <button
+              type="button"
+              aria-label="Concluir e voltar a editar o texto"
+              style={{ ...btn(), fontWeight: 700 }}
+              onClick={() => {
+                flushPush();
+                onClose();
+              }}
+            >
+              Concluir
+            </button>
           </div>
           {drawing && (
             <div style={row}>
