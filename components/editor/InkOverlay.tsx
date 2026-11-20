@@ -6,6 +6,7 @@ import { hitItem } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk } from "./ink-recognize";
+import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
 import { drawText, hitText, isInkLike, loadHandwritingFonts, textFromLine, textInPoly, unionBox, type LayerItem, type TextItem } from "./ink-text";
@@ -468,16 +469,49 @@ export default function InkOverlay({
     try {
       const { lines, failed } = await recognizeInk(src, w);
       const font = CONV_FONTS[convFontRef.current].v;
-      const gone = new Set(lines.flatMap((l) => l.ids));
-      const texts: TextItem[] = lines.map((l) => textFromLine(l, w, font));
       const base = itemsRef.current;
-      fadeRef.current = {
-        t0: performance.now(),
-        gone: base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id)),
-        texts: new Set(texts.map((t) => t.id)),
-      };
-      commit([...base.filter((it) => !gone.has(it.id)), ...texts], base);
-      schedule();
+      const gone = new Set(lines.flatMap((l) => l.ids));
+      const existing = base.filter((it): it is TextItem => it.kind === "text");
+      const updated = new Map<string, TextItem>();
+      const current = () => existing.map((t) => updated.get(t.id) ?? t);
+      const fresh: TextItem[] = [];
+      // Pedaço que continua uma linha já convertida (pausa no meio da frase, ou escrita durante a conversão)
+      // entra no mesmo texto, com o mesmo tamanho e a mesma altura, em vez de virar outro texto solto.
+      for (const l of lines) {
+        const mate = findMate(current(), l, w);
+        const joined = mate ? joinText(mate, l.text, /^[.,;:!?)\]]/.test(l.text), w) : null;
+        if (joined) updated.set(joined.id, joined);
+        else fresh.push(textFromLine(l, w, font));
+      }
+      // Ponto ou vírgula escritos sozinhos depois da conversão: vão para o fim do texto da mesma linha.
+      for (const it of src) {
+        if (gone.has(it.id)) continue;
+        const b = boundsOf([it], new Set([it.id]));
+        if (!b) continue;
+        const bw = (b[2] - b[0]) * w;
+        const bh = (b[3] - b[1]) * w;
+        const at = { left: b[0] * w, top: b[1] * w, bottom: b[3] * w };
+        const mate = findMate(current(), at, w);
+        if (!mate) continue;
+        const px = mate.size * w;
+        const small = Math.max(bw, bh) <= px * 0.4;
+        const atOrBelowMiddle = (at.top + at.bottom) / 2 >= mate.y * w - px * 0.15; // acento fica acima do meio da letra
+        if (!small || bw > bh * 1.8 || !atOrBelowMiddle) continue;
+        const joined = joinText(mate, bh >= bw * 1.8 ? "," : ".", true, w);
+        if (!joined) continue;
+        updated.set(joined.id, joined);
+        gone.add(it.id);
+      }
+      if (gone.size || fresh.length || updated.size) {
+        fadeRef.current = {
+          t0: performance.now(),
+          gone: base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id)),
+          texts: new Set(fresh.map((t) => t.id)),
+        };
+        const kept = base.filter((it) => !gone.has(it.id)).map((it): LayerItem => (it.kind === "text" ? (updated.get(it.id) ?? it) : it));
+        commit([...kept, ...fresh], base);
+        schedule();
+      }
       setAutoMsg(failed ? `${failed} ${failed === 1 ? "linha ficou" : "linhas ficaram"} como escrita à mão (não reconhecida).` : null);
     } catch (e) {
       setAutoMsg(e instanceof Error ? e.message : "Não consegui converter agora.");
