@@ -9,6 +9,7 @@ import "./attach-picker.css";
 import "./tables.css";
 import "./topics.css";
 import "./notebook-ux.css";
+import "./pdf-select.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",

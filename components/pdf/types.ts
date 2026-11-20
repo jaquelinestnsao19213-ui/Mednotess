@@ -1,7 +1,7 @@
 // Modelo das anotações. Tudo é guardado em coordenadas NORMALIZADAS (0 a 1)
 // em relação à página, então o desenho acompanha qualquer zoom ou tamanho de tela.
 
-export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "note";
+export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "note" | "select" | "clip";
 
 export type InkItem = {
   id: string;
@@ -27,6 +27,9 @@ export type Item = InkItem | EllipseItem;
 
 // text = texto simples (busca e comentário vazio); html = texto formatado; w/h = tamanho da caixa (px); fs = tamanho da letra (px)
 export type Note = { id: string; x: number; y: number; text: string; color: string; html?: string; w?: number; h?: number; fs?: number };
+
+// Comentário copiado (para colar em outro lugar do PDF)
+export type NoteClip = Pick<Note, "text" | "html" | "color" | "w" | "h" | "fs">;
 
 export type PageAnn = { items: Item[]; notes: Note[] };
 
@@ -82,6 +85,18 @@ export const opRemoveNote = (page: number, note: Note): Op => ({
   undo: (a) => ({ ...a, notes: [...a.notes, note] }),
 });
 
+// Mover o emblema do comentário de lugar (desfazer volta para a posição anterior)
+export const opMoveNote = (
+  page: number,
+  id: string,
+  from: { x: number; y: number },
+  to: { x: number; y: number }
+): Op => ({
+  page,
+  redo: (a) => ({ ...a, notes: a.notes.map((n) => (n.id === id ? { ...n, x: to.x, y: to.y } : n)) }),
+  undo: (a) => ({ ...a, notes: a.notes.map((n) => (n.id === id ? { ...n, x: from.x, y: from.y } : n)) }),
+});
+
 // ---------- Ferramentas ----------
 export const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "hand", label: "Navegar", glyph: "✋" },
@@ -90,6 +105,8 @@ export const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "circle", label: "Círculo", glyph: "◯" },
   { id: "eraser", label: "Borracha", glyph: "⌫" },
   { id: "note", label: "Comentário", glyph: "💬" },
+  { id: "select", label: "Selecionar texto", glyph: "T" },
+  { id: "clip", label: "Copiar imagem", glyph: "✂" },
 ];
 
 export const INK_COLORS = ["#1b2430", "#dc2626", "#2563eb", "#16a34a", "#9333ea", "#ea580c"];

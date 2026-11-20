@@ -1,0 +1,50 @@
+/* ---------- PDF: selecionar texto, copiar imagem, mover e colar comentários ---------- */
+
+/* Emblema do comentário: arrastável */
+.pdfnote-pin { touch-action: none; cursor: grab; }
+.pdfnote-pin:active { cursor: grabbing; }
+
+/* Camada de texto do PDF (invisível; só aparece a seleção) */
+.pdfpage-text {
+  --scale-factor: 2;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute; left: 0; top: 0; z-index: 2; overflow: clip;
+  transform-origin: 0 0; line-height: 1; text-align: initial; opacity: 1;
+  pointer-events: none; -webkit-user-select: none; user-select: none;
+  -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+}
+.pdfpage-text :is(span, br) {
+  color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%;
+}
+.pdfpage-text > :not(.markedContent),
+.pdfpage-text .markedContent span:not(.markedContent) {
+  z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1; --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pdfpage-text .markedContent { display: contents; }
+.pdfpage-text span.markedContent { top: 0; height: 0; }
+.pdfpage-text ::selection { background: rgb(37 99 235 / 0.3); }
+.pdfpage-text br::selection { background: transparent; }
+
+/* Só na ferramenta "Selecionar texto" a camada de texto recebe toques e permite copiar */
+.pdfnb-scroller[data-tool="select"] .pdfpage-text {
+  pointer-events: auto; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+}
+.pdfnb-scroller[data-tool="select"] .pdfpage-text :is(span, br) {
+  -webkit-user-select: text; user-select: text;
+}
+
+/* Ferramenta "Copiar imagem": retângulo sobre a página */
+.pdfpage-clip { position: absolute; inset: 0; z-index: 4; touch-action: none; cursor: crosshair; }
+.pdfpage-clip-box {
+  position: absolute; border: 2px dashed #2563eb; background: rgb(37 99 235 / 0.15); pointer-events: none;
+}
+.pdfpage-clipbar {
+  position: absolute; z-index: 7; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px;
+  max-width: min(100%, 360px); background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.pdfpage-clipmsg { flex-basis: 100%; font-size: 0.8rem; color: var(--muted); }
