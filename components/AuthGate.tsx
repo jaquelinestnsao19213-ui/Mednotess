@@ -32,6 +32,9 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Páginas compartilhadas (/s/…) abrem para qualquer pessoa com o link: sem login e sem o menu do app.
+  if (pathname.startsWith("/s/")) return <main className="shell wide">{children}</main>;
+
   if (!ready) return <main className="shell"><p className="muted">Carregando…</p></main>;
   if (!session) return <LoginForm />;
 
