@@ -36,9 +36,9 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
   { name: "Kalam", v: 'Kalam, "Segoe Print", "Bradley Hand", cursive' },
 ];
 
-const AUTO_DELAY_MS = 2400; // pausa sem escrever antes de converter sozinha (ao passar para outra linha, converte na hora)
 const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
+const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 
 export default function InkOverlay({
   layer,
@@ -77,11 +77,14 @@ export default function InkOverlay({
   const [convPos, setConvPos] = useState<{ left: number; top: number } | null>(null);
   const [convErase, setConvErase] = useState(true);
 
-  // Conversão automática: depois de uma pausa, a escrita recente vira texto na fonte escolhida, no mesmo lugar
+  // Conversão automática: depois de uma pausa (que você escolhe), a escrita recente vira texto na fonte escolhida, no mesmo lugar
   const [autoOn, setAutoOn] = useState(false);
+  const [autoDelay, setAutoDelay] = useState(4); // segundos de pausa antes de converter sozinha
   const [autoMsg, setAutoMsg] = useState<string | null>(null);
   const autoOnRef = useRef(false);
   autoOnRef.current = autoOn;
+  const autoDelayRef = useRef(autoDelay);
+  autoDelayRef.current = autoDelay;
   const convFontRef = useRef(convFont);
   convFontRef.current = convFont;
   const sizeRef = useRef(size);
@@ -103,12 +106,14 @@ export default function InkOverlay({
   const lassoRef = useRef<number[] | null>(null);
   const selRef = useRef<Set<string>>(new Set());
   const dragRef = useRef<{ sx: number; sy: number; base: LayerItem[] } | null>(null);
-  // Dois dedos com o laço: aumenta ou diminui o que está selecionado (gesto de pinça).
+  // Dois dedos: com o laço e algo selecionado, aumentam ou diminuem a seleção (pinça); nos demais casos, movem a página.
   const touchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchRef = useRef<{ d0: number; base: LayerItem[]; cx: number; cy: number } | null>(null);
+  const panRef = useRef<{ x: number; y: number } | null>(null);
   const undoRef = useRef<LayerItem[][]>([]);
   const redoRef = useRef<LayerItem[][]>([]);
   const pointerRef = useRef<number | null>(null);
+  const drawTypeRef = useRef("");
   const erasingRef = useRef(false);
   const eraseBaseRef = useRef<LayerItem[] | null>(null);
   const penSeenRef = useRef(false);
@@ -372,6 +377,31 @@ export default function InkOverlay({
     drawInkItem(ctx, smoothItemCached(it, smoothRef.current), w);
   };
 
+  // Um segundo dedo encostou: o que estava sendo feito com o primeiro (traço, borracha, laço) é descartado
+  // e os dois dedos passam a mover a página.
+  const cancelGesture = () => {
+    if (dragRef.current) {
+      itemsRef.current = dragRef.current.base;
+      dragRef.current = null;
+    }
+    if (erasingRef.current) {
+      erasingRef.current = false;
+      if (eraseBaseRef.current) itemsRef.current = eraseBaseRef.current;
+      eraseBaseRef.current = null;
+    }
+    lassoRef.current = null;
+    draftRef.current = null;
+    pointerRef.current = null;
+    clearLive();
+    schedule();
+  };
+
+  const touchCentroid = () => {
+    const pts = Array.from(touchesRef.current.values());
+    if (pts.length < 2) return null;
+    return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+  };
+
   // Carrega as fontes manuscritas e redesenha quando ficarem prontas.
   const scheduleRef = useRef(schedule);
   scheduleRef.current = schedule;
@@ -403,6 +433,7 @@ export default function InkOverlay({
       draftRef.current = null;
       touchesRef.current.clear();
       pinchRef.current = null;
+      panRef.current = null;
       clearLive();
       setConvOpen(false);
       setConvText(null);
@@ -412,6 +443,13 @@ export default function InkOverlay({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
+
+  // Trocar entre escrever e rolar zera os dedos que estavam na tela.
+  useEffect(() => {
+    touchesRef.current.clear();
+    pinchRef.current = null;
+    panRef.current = null;
+  }, [writing]);
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
 
@@ -449,10 +487,10 @@ export default function InkOverlay({
   // Conversão automática: lê a escrita recente, troca os traços por texto na fonte escolhida (um item por linha).
   const armAuto = () => {
     window.clearTimeout(autoTimerRef.current);
-    autoTimerRef.current = window.setTimeout(() => runAutoRef.current(), AUTO_DELAY_MS);
+    autoTimerRef.current = window.setTimeout(() => runAutoRef.current(), autoDelayRef.current * 1000);
   };
 
-  // "only": converte só estes traços (a linha que ficou para trás); sem ele, converte tudo o que está esperando.
+  // "only": converte só estes traços (a linha que ficou para trás, ou o que você mandou converter); sem ele, converte tudo o que está esperando.
   const runAuto = async (only?: Set<string>) => {
     if (autoBusyRef.current) {
       if (only) only.forEach((id) => pendingRef.current.add(id));
@@ -523,31 +561,54 @@ export default function InkOverlay({
     void runAuto();
   };
 
+  // Conversão depois de escrever: tudo de uma vez (ou só o que está selecionado com o laço), no mesmo lugar.
+  const convertNow = () => {
+    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen");
+    const picked = selRef.current;
+    const src = picked.size ? pens.filter((it) => picked.has(it.id)) : pens;
+    if (!src.length) {
+      setAutoMsg("Não há escrita de caneta para converter.");
+      return;
+    }
+    stopAuto();
+    setSelection([]);
+    void runAuto(new Set(src.map((it) => it.id)));
+  };
+
   const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!active || !writing || !size.w) return;
     if (e.pointerType === "pen") {
       penSeenRef.current = true;
       touchesRef.current.clear();
+      panRef.current = null;
     }
-    // Laço com algo selecionado: dois dedos na tela aumentam ou diminuem a seleção (gesto de pinça).
-    // Isso vale mesmo com a S Pen em uso; toques largos (palma da mão) são ignorados.
-    if (e.pointerType === "touch" && tool === "lasso" && selRef.current.size) {
-      if (Math.max(e.width, e.height) <= 60) touchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (touchesRef.current.size === 2 && !pinchRef.current) {
-        const [a, b] = Array.from(touchesRef.current.values());
-        const d0 = Math.hypot(a.x - b.x, a.y - b.y);
-        const box = unionBox(itemsRef.current, selRef.current, size.w);
-        if (box && d0 > 10) {
+    // Dois dedos na tela: com o laço e algo selecionado, a pinça aumenta ou diminui a seleção; nos demais casos,
+    // movem a página sem sair do modo de escrita. Vale mesmo com a S Pen em uso; palma da mão (toque largo) é ignorada,
+    // assim como toques enquanto a caneta está escrevendo.
+    if (e.pointerType === "touch") {
+      const palm = Math.max(e.width, e.height) > PALM_PX;
+      const penBusy = pointerRef.current !== null && drawTypeRef.current === "pen";
+      if (!palm && !penBusy) {
+        touchesRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (touchesRef.current.size === 2 && !pinchRef.current && !panRef.current) {
+          const [a, b] = Array.from(touchesRef.current.values());
+          const d0 = Math.hypot(a.x - b.x, a.y - b.y);
+          const box = tool === "lasso" && selRef.current.size ? unionBox(itemsRef.current, selRef.current, size.w) : null;
           e.preventDefault();
-          // O primeiro dedo pode ter começado a arrastar: volta ao ponto de partida antes de redimensionar.
-          if (dragRef.current) {
-            itemsRef.current = dragRef.current.base;
-            dragRef.current = null;
+          if (box && d0 > 10) {
+            // O primeiro dedo pode ter começado a arrastar: volta ao ponto de partida antes de redimensionar.
+            if (dragRef.current) {
+              itemsRef.current = dragRef.current.base;
+              dragRef.current = null;
+            }
+            lassoRef.current = null;
+            pointerRef.current = null;
+            pinchRef.current = { d0, base: itemsRef.current, cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
+            schedule();
+          } else {
+            cancelGesture();
+            panRef.current = touchCentroid();
           }
-          lassoRef.current = null;
-          pointerRef.current = null;
-          pinchRef.current = { d0, base: itemsRef.current, cx: (box[0] + box[2]) / 2, cy: (box[1] + box[3]) / 2 };
-          schedule();
           return;
         }
       }
@@ -558,6 +619,7 @@ export default function InkOverlay({
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     pointerRef.current = e.pointerId;
+    drawTypeRef.current = e.pointerType;
     window.clearTimeout(autoTimerRef.current); // voltou a escrever: espera a próxima pausa
     const [x, y] = toPoint(e.clientX, e.clientY);
 
@@ -609,7 +671,19 @@ export default function InkOverlay({
         }
         return;
       }
+      // Dois dedos movendo a página: ela acompanha o centro entre os dedos.
+      if (panRef.current) {
+        e.preventDefault();
+        const c = touchCentroid();
+        if (c) {
+          window.scrollBy(panRef.current.x - c.x, panRef.current.y - c.y);
+          panRef.current = c;
+        }
+        return;
+      }
     }
+    // Caneta pairando perto da tela: você ainda está escrevendo, então a conversão continua esperando.
+    if (e.pointerType === "pen" && pointerRef.current === null && autoOnRef.current && pendingRef.current.size) armAuto();
     if (e.pointerId !== pointerRef.current) return;
     e.preventDefault();
     const ne = e.nativeEvent;
@@ -666,6 +740,8 @@ export default function InkOverlay({
         }
         return;
       }
+      if (touchesRef.current.size < 2) panRef.current = null;
+      if (e.pointerId !== pointerRef.current) return;
     }
     if (e.pointerId !== pointerRef.current) return;
     pointerRef.current = null;
@@ -944,6 +1020,7 @@ export default function InkOverlay({
                       </button>
                     ))}
                   </div>
+                  <b style={{ fontSize: 13 }}>Enquanto eu escrevo</b>
                   <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, fontWeight: 600 }}>
                     <input
                       type="checkbox"
@@ -959,23 +1036,45 @@ export default function InkOverlay({
                     Converter sozinha quando eu parar de escrever
                   </label>
                   {autoOn && (
-                    <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                      Escreva uma linha e faça uma pausa de 2 a 3 segundos, ou comece a escrever na linha de baixo: a letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Desenhos também podem ser convertidos sem querer; ↶ desfaz. Precisa de internet.
-                    </p>
+                    <>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                        <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Pausa</span>
+                        <input
+                          type="range"
+                          min={2}
+                          max={10}
+                          step={1}
+                          value={autoDelay}
+                          aria-label="Tempo de pausa antes de converter"
+                          onChange={(e) => setAutoDelay(Number(e.target.value))}
+                          style={{ flex: 1, minWidth: 80 }}
+                        />
+                        <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
+                        Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Desenhos também podem ser convertidos sem querer; ↶ desfaz. Precisa de internet.
+                      </p>
+                    </>
                   )}
+                  <b style={{ fontSize: 13 }}>Depois de escrever</b>
                   <div style={row}>
-                    <button type="button" style={{ ...btn(false, convBusy), fontWeight: 700 }} disabled={convBusy} onClick={convert}>
+                    <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={convertNow}>
+                      {selIds.length ? `Converter agora os ${selIds.length} selecionados` : "Converter toda a escrita agora"}
+                    </button>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                    Escreva tudo o que quiser e converta no fim, no mesmo lugar. Use o ⬚ Laço para escolher só um trecho.
+                  </p>
+                  <div style={row}>
+                    <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
                       {convBusy
                         ? "Reconhecendo…"
                         : selIds.length
-                          ? `Inserir no texto da página: os ${selIds.length} selecionados`
-                          : "Inserir toda a escrita no texto da página"}
+                          ? `Passar para o texto da página: os ${selIds.length} selecionados`
+                          : "Passar toda a escrita para o texto da página (editável)"}
                     </button>
                   </div>
                   {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
-                  <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
-                    O botão acima converte uma vez e coloca o resultado no texto da página, para você editar. Use o ⬚ Laço para escolher só um trecho.
-                  </p>
                 </>
               ) : (
                 <>
