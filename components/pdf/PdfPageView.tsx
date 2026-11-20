@@ -2,16 +2,20 @@
 
 import { memo, useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import { loadPdfjs } from "@/lib/pdfjs";
 import { drawItem, drawItems, hitItem } from "./draw";
 import NoteCard from "./NoteCard";
 import {
   opAddItem,
+  opAddNote,
+  opMoveNote,
   opRemoveItems,
   uid,
   type EllipseItem,
   type InkItem,
   type Item,
   type Note,
+  type NoteClip,
   type Op,
   type PageAnn,
   type Tool,
@@ -37,6 +41,7 @@ export type PageProps = {
   onOpenNote: (id: string | null) => void;
   onNoteText: (n: number, id: string, text: string) => void;
   onNoteDelete: (n: number, id: string) => void;
+  onCopyNote: (clip: NoteClip) => void;
   claim: (pointerId: number) => boolean;
   isPinching: () => boolean;
 };
@@ -46,8 +51,25 @@ type Session =
   | { kind: "ellipse"; pid: number; color: string; width: number; x0: number; y0: number; x1: number; y1: number }
   | { kind: "erase"; pid: number; cur: PageAnn; removed: Item[] };
 
+type Crop = { x0: number; y0: number; x1: number; y1: number };
+type PinDrag = { id: string; pid: number; sx: number; sy: number; ox: number; oy: number; x0: number; y0: number; moved: boolean };
+
+// A camada de texto é criada uma vez em escala 2 e depois só é redimensionada por CSS (acompanha o zoom).
+const TEXT_SCALE = 2;
+
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 const r4 = (v: number) => Math.round(v * 10000) / 10000;
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
 
 function PdfPageView(p: PageProps) {
   const { doc, n, width, ratio, active } = p;
@@ -57,11 +79,21 @@ function PdfPageView(p: PageProps) {
   const pdfCanvas = useRef<HTMLCanvasElement>(null);
   const baseCanvas = useRef<HTMLCanvasElement>(null);
   const liveCanvas = useRef<HTMLCanvasElement>(null);
+  const textDiv = useRef<HTMLDivElement>(null);
   const session = useRef<Session | null>(null);
   const annRef = useRef(p.ann);
   annRef.current = p.ann;
   const propsRef = useRef(p);
   propsRef.current = p;
+
+  const pinDrag = useRef<PinDrag | null>(null);
+  const pinMoved = useRef(false);
+
+  const [textW, setTextW] = useState(0);
+  const [crop, setCrop] = useState<Crop | null>(null);
+  const [cropDragging, setCropDragging] = useState(false);
+  const [cropMsg, setCropMsg] = useState("");
+  const cropSession = useRef<{ pid: number; x0: number; y0: number } | null>(null);
 
   // A página só é redesenhada em alta resolução depois que o zoom "assenta".
   const [renderW, setRenderW] = useState(width);
@@ -108,6 +140,46 @@ function PdfPageView(p: PageProps) {
       task?.cancel();
     };
   }, [active, doc, n, renderW]);
+
+  // 1b) Camada de texto invisível por cima do PDF: é ela que permite selecionar e copiar o texto.
+  useEffect(() => {
+    if (!active) return;
+    const box = textDiv.current;
+    if (!box) return;
+    let cancelled = false;
+    let layer: { cancel: () => void } | null = null;
+    (async () => {
+      try {
+        const [pdfjs, page] = await Promise.all([loadPdfjs(), doc.getPage(n)]);
+        if (cancelled) return;
+        const vp = page.getViewport({ scale: TEXT_SCALE });
+        box.replaceChildren();
+        box.style.setProperty("--scale-factor", String(TEXT_SCALE));
+        const tl = new pdfjs.TextLayer({ textContentSource: page.streamTextContent(), container: box, viewport: vp });
+        layer = tl;
+        box.style.width = `${vp.width}px`;
+        box.style.height = `${vp.height}px`;
+        setTextW(vp.width);
+        await tl.render();
+      } catch {
+        /* página sem texto ou camada cancelada: normal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      layer?.cancel();
+    };
+  }, [active, doc, n]);
+
+  // Sai da ferramenta "Copiar imagem": limpa o retângulo.
+  useEffect(() => {
+    if (p.tool !== "clip") {
+      setCrop(null);
+      setCropMsg("");
+      setCropDragging(false);
+      cropSession.current = null;
+    }
+  }, [p.tool]);
 
   // 2) Desenha as anotações salvas (camada separada, por cima do PDF).
   useEffect(() => {
@@ -186,7 +258,7 @@ function PdfPageView(p: PageProps) {
   }
 
   function onDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (!p.editable || p.tool === "hand" || p.tool === "note") return;
+    if (!p.editable || p.tool === "hand" || p.tool === "note" || p.tool === "select" || p.tool === "clip") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "touch" && !p.fingerDraw) return;
     if (!p.claim(e.pointerId)) return;
@@ -262,8 +334,163 @@ function PdfPageView(p: PageProps) {
     p.onApply(n, next);
   }
 
+  // ---------- Mover o emblema do comentário (arrastar) ----------
+  function onPinDown(e: React.PointerEvent<HTMLButtonElement>, note: Note) {
+    if (!p.editable) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const [px, py] = toPage(e.clientX, e.clientY);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pinDrag.current = {
+      id: note.id,
+      pid: e.pointerId,
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: note.x - px,
+      oy: note.y - py,
+      x0: note.x,
+      y0: note.y,
+      moved: false,
+    };
+    pinMoved.current = false;
+  }
+
+  function onPinMove(e: React.PointerEvent<HTMLButtonElement>) {
+    const d = pinDrag.current;
+    if (!d || d.pid !== e.pointerId) return;
+    if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 6) return;
+    d.moved = true;
+    pinMoved.current = true;
+    const [px, py] = toPage(e.clientX, e.clientY);
+    patchNote(d.id, { x: r4(clamp01(px + d.ox)), y: r4(clamp01(py + d.oy)) });
+  }
+
+  function onPinUp(e: React.PointerEvent<HTMLButtonElement>) {
+    const d = pinDrag.current;
+    if (!d || d.pid !== e.pointerId) return;
+    pinDrag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    if (!d.moved) return;
+    const now = annRef.current.notes.find((x) => x.id === d.id);
+    if (now && (now.x !== d.x0 || now.y !== d.y0)) {
+      p.onRecord(opMoveNote(n, d.id, { x: d.x0, y: d.y0 }, { x: now.x, y: now.y }));
+    }
+    // o clique que vem logo depois de arrastar não deve abrir/fechar o comentário
+    window.setTimeout(() => {
+      pinMoved.current = false;
+    }, 0);
+  }
+
+  // Cria uma cópia do comentário logo ao lado (depois é só arrastar o emblema para onde quiser).
+  function duplicateNote(id: string) {
+    const a = annRef.current;
+    const src = a.notes.find((x) => x.id === id);
+    if (!src) return;
+    const copy: Note = { ...src, id: uid(), x: r4(clamp01(src.x + 0.04)), y: r4(clamp01(src.y + 0.05)) };
+    const next = { ...a, notes: [...a.notes, copy] };
+    annRef.current = next;
+    p.onApply(n, next);
+    p.onRecord(opAddNote(n, copy));
+    p.onOpenNote(null);
+  }
+
+  // ---------- Copiar imagem (recorte da página) ----------
+  function onCropDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.pointerType === "touch" && !p.fingerDraw) return;
+    if (!p.claim(e.pointerId)) return;
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const [x, y] = toPage(e.clientX, e.clientY);
+    cropSession.current = { pid: e.pointerId, x0: x, y0: y };
+    setCropMsg("");
+    setCropDragging(true);
+    setCrop({ x0: x, y0: y, x1: x, y1: y });
+  }
+
+  function onCropMove(e: React.PointerEvent<HTMLDivElement>) {
+    const s = cropSession.current;
+    if (!s || s.pid !== e.pointerId) return;
+    if (p.isPinching()) {
+      cropSession.current = null;
+      setCropDragging(false);
+      setCrop(null);
+      return;
+    }
+    const [x, y] = toPage(e.clientX, e.clientY);
+    setCrop({ x0: s.x0, y0: s.y0, x1: x, y1: y });
+  }
+
+  function onCropUp(e: React.PointerEvent<HTMLDivElement>, cancelled: boolean) {
+    const s = cropSession.current;
+    if (!s || s.pid !== e.pointerId) return;
+    cropSession.current = null;
+    setCropDragging(false);
+    setCrop((c) => {
+      if (!c || cancelled) return null;
+      const w = Math.abs(c.x1 - c.x0) * width;
+      const h = Math.abs(c.y1 - c.y0) * height;
+      return w < 12 || h < 12 ? null : c;
+    });
+  }
+
+  // Redesenha só o trecho escolhido em alta resolução (sem as anotações), para a imagem sair nítida.
+  async function renderCrop(c: Crop): Promise<Blob> {
+    const page = await doc.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const l = Math.min(c.x0, c.x1);
+    const t = Math.min(c.y0, c.y1);
+    const w = Math.abs(c.x1 - c.x0);
+    const h = Math.abs(c.y1 - c.y0);
+    const scale = Math.min(4, Math.max(2, 1800 / Math.max(1, w * base.width)));
+    const full = page.getViewport({ scale });
+    const vp = page.getViewport({ scale, offsetX: -l * full.width, offsetY: -t * full.height });
+    const out = document.createElement("canvas");
+    out.width = Math.max(1, Math.round(w * full.width));
+    out.height = Math.max(1, Math.round(h * full.height));
+    const ctx = out.getContext("2d");
+    if (!ctx) throw new Error("canvas indisponível");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, out.width, out.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    return await new Promise<Blob>((resolve, reject) => {
+      out.toBlob((b) => (b ? resolve(b) : reject(new Error("sem imagem"))), "image/png");
+    });
+  }
+
+  async function cropCopy() {
+    if (!crop) return;
+    setCropMsg("Preparando a imagem…");
+    try {
+      const promise = renderCrop(crop);
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard && typeof navigator.clipboard.write === "function") {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": promise })]);
+        setCropMsg("Imagem copiada! Cole no comentário ou na anotação.");
+      } else {
+        saveBlob(await promise, `pdf-pagina-${n}.png`);
+        setCropMsg("Este navegador não deixa copiar imagem; ela foi baixada.");
+      }
+    } catch {
+      setCropMsg("Não consegui copiar. Toque em Baixar.");
+    }
+  }
+
+  async function cropDownload() {
+    if (!crop) return;
+    setCropMsg("Preparando a imagem…");
+    try {
+      saveBlob(await renderCrop(crop), `pdf-pagina-${n}.png`);
+      setCropMsg("Imagem baixada.");
+    } catch {
+      setCropMsg("Não consegui gerar a imagem.");
+    }
+  }
+
   const drawingTool = p.tool === "pen" || p.tool === "highlighter" || p.tool === "circle" || p.tool === "eraser";
   const hasOpenNote = p.ann.notes.some((x) => x.id === p.openNoteId);
+
+  const rect = crop
+    ? { l: Math.min(crop.x0, crop.x1), t: Math.min(crop.y0, crop.y1), w: Math.abs(crop.x1 - crop.x0), h: Math.abs(crop.y1 - crop.y0) }
+    : null;
 
   return (
     <div
@@ -290,9 +517,59 @@ function PdfPageView(p: PageProps) {
             onPointerUp={(e) => finish(e, false)}
             onPointerCancel={(e) => finish(e, true)}
           />
+          <div
+            ref={textDiv}
+            className="pdfpage-text"
+            aria-hidden="true"
+            style={textW > 0 ? { transform: `scale(${width / textW})` } : { display: "none" }}
+          />
         </>
       ) : (
         <span className="pdfpage-wait">Página {n}</span>
+      )}
+
+      {active && p.tool === "clip" && (
+        <div
+          className="pdfpage-clip"
+          onPointerDown={onCropDown}
+          onPointerMove={onCropMove}
+          onPointerUp={(e) => onCropUp(e, false)}
+          onPointerCancel={(e) => onCropUp(e, true)}
+        >
+          {rect && (
+            <div
+              className="pdfpage-clip-box"
+              style={{ left: `${rect.l * 100}%`, top: `${rect.t * 100}%`, width: `${rect.w * 100}%`, height: `${rect.h * 100}%` }}
+            />
+          )}
+        </div>
+      )}
+
+      {active && p.tool === "clip" && rect && !cropDragging && (
+        <div
+          className="pdfpage-clipbar"
+          data-nopan=""
+          onPointerDown={(e) => e.stopPropagation()}
+          style={{
+            left: `${Math.min(rect.l * 100, 40)}%`,
+            top: rect.t + rect.h > 0.85 ? `calc(${rect.t * 100}% - 56px)` : `calc(${(rect.t + rect.h) * 100}% + 8px)`,
+          }}
+        >
+          <button type="button" className="pdfnb-btn on" onClick={() => void cropCopy()}>Copiar imagem</button>
+          <button type="button" className="pdfnb-btn" onClick={() => void cropDownload()}>Baixar</button>
+          <button
+            type="button"
+            className="pdfnb-btn"
+            aria-label="Cancelar"
+            onClick={() => {
+              setCrop(null);
+              setCropMsg("");
+            }}
+          >
+            ✕
+          </button>
+          {cropMsg && <span className="pdfpage-clipmsg">{cropMsg}</span>}
+        </div>
       )}
 
       {p.ann.notes.map((note) => (
@@ -301,8 +578,16 @@ function PdfPageView(p: PageProps) {
             type="button"
             className="pdfnote-pin"
             style={{ left: `${note.x * 100}%`, top: `${note.y * 100}%`, background: note.color }}
-            aria-label="Abrir comentário"
-            onClick={() => p.onOpenNote(p.openNoteId === note.id ? null : note.id)}
+            aria-label="Abrir comentário (arraste para mover)"
+            title="Toque para abrir • arraste para mover"
+            onPointerDown={(e) => onPinDown(e, note)}
+            onPointerMove={onPinMove}
+            onPointerUp={onPinUp}
+            onPointerCancel={onPinUp}
+            onClick={() => {
+              if (pinMoved.current) return;
+              p.onOpenNote(p.openNoteId === note.id ? null : note.id);
+            }}
           >
             💬
           </button>
@@ -312,6 +597,8 @@ function PdfPageView(p: PageProps) {
               onPatch={(patch) => patchNote(note.id, patch)}
               onDelete={() => p.onNoteDelete(n, note.id)}
               onClose={() => p.onOpenNote(null)}
+              onCopy={p.onCopyNote}
+              onDuplicate={() => duplicateNote(note.id)}
             />
           )}
         </div>

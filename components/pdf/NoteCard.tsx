@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Note } from "./types";
+import type { Note, NoteClip } from "./types";
 import { extFromFile, mediaErrorMessage, uploadMedia } from "@/lib/media";
 
 const ALLOWED = new Set([
@@ -109,10 +109,12 @@ type Props = {
   onPatch: (patch: Partial<Note>) => void;
   onDelete: () => void;
   onClose: () => void;
+  onCopy: (clip: NoteClip) => void; // guarda o comentário para colar em outro lugar do PDF
+  onDuplicate: () => void; // cria uma cópia ao lado
 };
 
 // Comentário do PDF: editor com negrito, título, marca-texto e lista; tamanho da letra e da caixa ajustáveis.
-export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
+export default function NoteCard({ note, onPatch, onDelete, onClose, onCopy, onDuplicate }: Props) {
   const ed = useRef<HTMLDivElement>(null);
   const patchRef = useRef(onPatch);
   patchRef.current = onPatch;
@@ -255,6 +257,45 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
     patchRef.current({ fs: clamp(fs + delta, 11, 28) });
   }
 
+  // Copia o comentário inteiro (com formatação) para a área de transferência e guarda para "Colar comentário" em outro ponto do PDF.
+  async function copyAll() {
+    const el = ed.current;
+    if (!el) return;
+    const html = el.innerHTML;
+    const text = el.innerText;
+    onCopy({
+      text: el.innerText.trim() === "" && el.querySelector("img") ? "[imagem]" : text,
+      html,
+      color: note.color,
+      w: size.w,
+      h: size.h,
+      fs,
+    });
+    try {
+      if (!navigator.clipboard || typeof ClipboardItem === "undefined") throw new Error("sem suporte");
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+    } catch {
+      // Plano B: seleciona o conteúdo e usa o comando de copiar do navegador.
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* ignora */
+      }
+    }
+    setStatus("Comentário copiado. Use \"Colar comentário\" na barra para colocar em outro ponto.");
+    window.setTimeout(() => setStatus(null), 3200);
+  }
+
   const keep = (e: React.MouseEvent) => e.preventDefault();
 
   return (
@@ -340,6 +381,8 @@ export default function NoteCard({ note, onPatch, onDelete, onClose }: Props) {
         .pdfnote-edit hr { border: 0; border-top: 1px solid var(--line, #d5dbe3); margin: 8px 0; }
       `}</style>
       <div className="pdfnote-actions">
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={() => void copyAll()}>Copiar</button>
+        <button type="button" className="pdfnb-btn" onMouseDown={keep} onClick={onDuplicate}>Duplicar</button>
         <button type="button" className="pdfnb-btn" onClick={onDelete}>Excluir</button>
         <button type="button" className="pdfnb-btn on" onClick={onClose}>Pronto</button>
       </div>
