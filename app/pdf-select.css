@@ -48,3 +48,9 @@
   border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
 }
 .pdfpage-clipmsg { flex-basis: 100%; font-size: 0.8rem; color: var(--muted); }
+
+/* ---------- Marca-texto atrás do texto ---------- */
+/* A camada do marca-texto se mistura com o que está embaixo (multiply): a cor aparece por trás e as letras continuam escuras. */
+.pdfpage canvas.pdfpage-mark { mix-blend-mode: multiply; pointer-events: none; }
+.pdfpage-live[data-tool="highlighter"] { mix-blend-mode: multiply; }
+.img-strokes.mark, .imgmod-canvas.mark { mix-blend-mode: multiply; pointer-events: none; }

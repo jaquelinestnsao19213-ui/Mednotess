@@ -34,25 +34,33 @@ export default function ImageDrawModal({ src, initial, onSave, onClose }: { src:
   const itemsRef = useRef(items);
   const draft = useRef<Draft | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const markCanvas = useRef<HTMLCanvasElement>(null);
   const board = useRef<HTMLDivElement>(null);
 
   const paint = useCallback(() => {
     const c = canvas.current;
+    const m = markCanvas.current;
     const b = board.current;
-    if (!c || !b) return;
+    if (!c || !m || !b) return;
     const w = b.clientWidth;
     const h = b.clientHeight;
     if (!w || !h) return;
     const ratio = Math.min(3, window.devicePixelRatio || 1);
-    if (c.width !== Math.round(w * ratio) || c.height !== Math.round(h * ratio)) {
-      c.width = Math.round(w * ratio);
-      c.height = Math.round(h * ratio);
+    const list = (() => {
+      const d = draft.current;
+      return d && d.kind !== "erase" ? [...itemsRef.current, d.item] : itemsRef.current;
+    })();
+    // O marca-texto fica numa camada atrás da caneta e se mistura com a imagem (multiply).
+    for (const [cv, layer] of [[c, "rest"], [m, "marker"]] as const) {
+      if (cv.width !== Math.round(w * ratio) || cv.height !== Math.round(h * ratio)) {
+        cv.width = Math.round(w * ratio);
+        cv.height = Math.round(h * ratio);
+      }
+      const ctx = cv.getContext("2d");
+      if (!ctx) continue;
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      drawItems(ctx, list, w, h, layer);
     }
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const d = draft.current;
-    drawItems(ctx, d && d.kind !== "erase" ? [...itemsRef.current, d.item] : itemsRef.current, w, h);
   }, []);
 
   useEffect(() => {
@@ -202,6 +210,7 @@ export default function ImageDrawModal({ src, initial, onSave, onClose }: { src:
         <div className="imgmod-board" ref={board}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={src} alt="" draggable={false} className="imgmod-img" onLoad={paint} />
+          <canvas ref={markCanvas} className="imgmod-canvas mark" aria-hidden="true" />
           <canvas
             ref={canvas}
             className="imgmod-canvas"

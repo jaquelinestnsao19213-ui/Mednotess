@@ -37,9 +37,16 @@ export function drawItem(ctx: CanvasRenderingContext2D, it: Item, W: number, H: 
   ctx.restore();
 }
 
-export function drawItems(ctx: CanvasRenderingContext2D, items: Item[], W: number, H: number) {
+// Marca-texto de caneta: fica numa camada própria, atrás da escrita, com mistura "multiply" (o texto por baixo continua escuro).
+export const isMarker = (it: { kind: string; tool?: string }) => it.kind === "ink" && it.tool === "highlighter";
+
+// "marker" desenha só os marca-textos; "rest" desenha todo o resto; sem o argumento, desenha tudo.
+export function drawItems(ctx: CanvasRenderingContext2D, items: Item[], W: number, H: number, layer?: "marker" | "rest") {
   ctx.clearRect(0, 0, W, H);
-  for (const it of items) drawItem(ctx, it, W, H);
+  for (const it of items) {
+    if (layer && isMarker(it) !== (layer === "marker")) continue;
+    drawItem(ctx, it, W, H);
+  }
 }
 
 function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
