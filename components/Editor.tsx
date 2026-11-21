@@ -21,7 +21,7 @@ import { FontFamilyPicker, TableFormatting } from "./editor/FormatExtras";
 import TableGrip from "./editor/TableGrip";
 import { AudioNote, VideoNote } from "./editor/media-extensions";
 import { InkBlock } from "./editor/ink-extension";
-import InkOverlay, { readInkLayer, type InkLayer } from "./editor/InkOverlay";
+import InkOverlay, { readInkLayer, type InkLayer, type InkReflow } from "./editor/InkOverlay";
 import { PasteEnhancer } from "./editor/paste-enhancer";
 import AudioRecorder, { type RecordingData } from "./editor/AudioRecorder";
 import MediaIndex from "./editor/MediaIndex";
@@ -35,6 +35,8 @@ import { looksLikeMarkdown, markdownToHtml } from "@/lib/markdown-paste";
 import "@/app/bubble-touch.css";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
+
+const PEN_AUTO_KEY = "mednotes-pen-auto"; // caneta automática: lembrada no aparelho ("1" ligada, "0" desligada)
 
 const BLOCKS: Cmd[] = [
   { label: "Texto", keywords: "texto paragrafo", run: (e) => e.chain().focus().setParagraph().run() },
@@ -119,6 +121,21 @@ export default function Editor({
   layerRef.current = layer;
   const withLayer = (doc: JSONContent): JSONContent => (layerRef.current.items.length ? { ...doc, inkLayer: layerRef.current } : doc);
 
+  // Integração entre texto digitado e escrita à mão:
+  // - caneta automática: a caneta escreve direto (sem apertar ✍); dedo e teclado continuam no texto;
+  // - o texto que cresce ou encolhe empurra a escrita que está abaixo dele.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  const [penAuto, setPenAuto] = useState(false);
+  const penAutoRef = useRef(false);
+  penAutoRef.current = penAuto;
+  const overlayOnRef = useRef(false);
+  overlayOnRef.current = overlayOn;
+  const penPausedRef = useRef(false); // "Pausar": a caneta não abre a escrita sozinha até você tocar em ✍
+  const [reflow, setReflow] = useState<InkReflow | null>(null);
+  const reflowN = useRef(0);
+  const contentEndRef = useRef(0);
+
   const slashRef = useRef(slash);
   slashRef.current = slash;
   const indexRef = useRef(0);
@@ -135,9 +152,20 @@ export default function Editor({
   }
 
   function startOverlay() {
+    penPausedRef.current = false;
     editorRef.current?.commands.blur();
     setSheet(null);
     setOverlayOn(true);
+  }
+
+  function changePenAuto(v: boolean) {
+    setPenAuto(v);
+    if (v) penPausedRef.current = false;
+    try {
+      window.localStorage.setItem(PEN_AUTO_KEY, v ? "1" : "0");
+    } catch {
+      // armazenamento indisponível: vale só nesta sessão
+    }
   }
 
   const allItems: Cmd[] = [
@@ -353,6 +381,93 @@ export default function Editor({
   }, []);
 
   useEffect(() => () => window.clearTimeout(holdTimer.current), []);
+
+  // Caneta automática: padrão ligado em tablet/celular (toque), desligado no computador; a escolha fica guardada no aparelho.
+  useEffect(() => {
+    const coarse = !!window.matchMedia?.("(pointer: coarse)").matches;
+    try {
+      const raw = window.localStorage.getItem(PEN_AUTO_KEY);
+      setPenAuto(raw === "1" ? true : raw === "0" ? false : coarse);
+    } catch {
+      setPenAuto(coarse);
+    }
+  }, []);
+
+  // Caneta automática: a caneta chegando perto (ou tocando) da página já abre a escrita à mão, sem apertar ✍ e sem fechar o teclado.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || !editor) return;
+    const onPen = (e: PointerEvent) => {
+      if (e.pointerType !== "pen") return;
+      if (!penAutoRef.current || overlayOnRef.current || penPausedRef.current) return;
+      setOverlayOn(true);
+    };
+    el.addEventListener("pointermove", onPen, { passive: true });
+    el.addEventListener("pointerdown", onPen, { passive: true });
+    return () => {
+      el.removeEventListener("pointermove", onPen);
+      el.removeEventListener("pointerdown", onPen);
+    };
+  }, [editor]);
+
+  // O texto digitado empurra a escrita à mão: quando o fim do texto desce ou sobe por causa de uma edição,
+  // a escrita que está abaixo de onde você digitou desce ou sobe junto.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!editor || !wrap) return;
+    const dom = editor.view.dom as HTMLElement;
+    const contentEnd = () => {
+      const last = dom.lastElementChild as HTMLElement | null;
+      if (!last) return 0;
+      return last.getBoundingClientRect().bottom - wrap.getBoundingClientRect().top;
+    };
+    contentEndRef.current = contentEnd();
+    let raf = 0;
+    const onTransaction = ({ transaction }: { transaction: { docChanged: boolean } }) => {
+      if (!transaction.docChanged) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const before = contentEndRef.current;
+        const now = contentEnd();
+        contentEndRef.current = now;
+        const dy = now - before;
+        if (!before || Math.abs(dy) < 2 || !layerRef.current.items.length) return;
+        let y: number;
+        try {
+          y = editor.view.coordsAtPos(editor.state.selection.head).top - wrap.getBoundingClientRect().top;
+        } catch {
+          return;
+        }
+        reflowN.current += 1;
+        setReflow({ n: reflowN.current, y, dy });
+      });
+    };
+    // Mudanças que não vêm de edição (imagem carregando, janela girando) só atualizam a referência.
+    const refresh = () => {
+      if (!raf) contentEndRef.current = contentEnd();
+    };
+    editor.on("transaction", onTransaction);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(refresh) : null;
+    ro?.observe(dom);
+    dom.addEventListener("load", refresh, true);
+    return () => {
+      editor.off("transaction", onTransaction);
+      ro?.disconnect();
+      dom.removeEventListener("load", refresh, true);
+      cancelAnimationFrame(raf);
+    };
+  }, [editor]);
+
+  // As ferramentas da escrita à mão ficam acima da barra de digitação (sem uma cobrir a outra).
+  useEffect(() => {
+    const root = document.documentElement;
+    const el = dockRef.current;
+    root.style.setProperty("--dock-h", el ? `${el.offsetHeight}px` : "0px");
+    return () => {
+      root.style.setProperty("--dock-h", "0px");
+    };
+  }, [focused, sheet, overlayOn]);
 
   async function insertImages(files: File[], pos?: number) {
     const e = editorRef.current;
@@ -606,9 +721,21 @@ export default function Editor({
       </BubbleMenu>
 
       <MediaIndex editor={editor} />
-      <div style={{ position: "relative" }}>
+      <div ref={wrapRef} style={{ position: "relative" }}>
         <EditorContent editor={editor} />
-        <InkOverlay layer={layer} onChange={changeLayer} active={overlayOn} onClose={() => setOverlayOn(false)} />
+        <InkOverlay
+          layer={layer}
+          onChange={changeLayer}
+          active={overlayOn}
+          onClose={() => {
+            // Em modo automático, "Pausar" impede a caneta de reabrir a escrita sozinha até você tocar em ✍ de novo.
+            if (penAutoRef.current) penPausedRef.current = true;
+            setOverlayOn(false);
+          }}
+          auto={penAuto}
+          onAutoChange={changePenAuto}
+          reflow={reflow}
+        />
       </div>
       <TableGrip editor={editor} />
       {message && <p className="notice">{message}</p>}
@@ -758,7 +885,7 @@ export default function Editor({
             </div>
           )}
 
-          <div className="dock" onMouseDown={keep} role="toolbar" aria-label="Ferramentas de escrita">
+          <div ref={dockRef} className="dock" onMouseDown={keep} role="toolbar" aria-label="Ferramentas de escrita">
             <button type="button" aria-label="Inserir bloco" className={sheet === "insert" ? "on" : ""} onClick={() => setSheet(sheet === "insert" ? null : "insert")}>＋</button>
             <button type="button" aria-label="Formatação do texto" className={sheet === "format" ? "on" : ""} onClick={() => setSheet(sheet === "format" ? null : "format")}>Aa</button>
             <button type="button" aria-label="Negrito" className={editor.isActive("bold") ? "on" : ""} onClick={() => chain().toggleBold().run()}><b>B</b></button>
