@@ -44,7 +44,8 @@ const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
-const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
+const PEN_AWAY_MS = 350; // tempo sem a caneta perto da tela até o dedo voltar a rolar/mexer no texto
+const PEN_IDLE_MS = 1500; // caneta parada no ar (sem nenhum sinal) por esse tempo: conta como afastada, e o dedo rola a página
 const BAR_IDLE_MS = 10000; // modo automático: a barra de ferramentas some depois desse tempo sem a caneta
 const TAP_MS = 250; // toque rápido da caneta (sem arrastar) conta como "toque", não como traço
 const TAP_MOVE_PX = 6; // quanto a caneta pode se mexer e ainda ser um toque
@@ -124,9 +125,12 @@ export default function InkOverlay({
   const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
 
-  // Caneta automática: "penNear" = a caneta está sobre a página (o desenho captura só a caneta);
-  // "barOn" = a barra de ferramentas está visível (some sozinha quando você só digita).
+  // "penNear" = a caneta está sobre a página (o desenho captura só a caneta); sem ela por perto, o dedo rola a página.
+  // "penEver" = já apareceu uma caneta neste aparelho: a partir daí o dedo sempre rola e só a caneta escreve
+  // (sem precisar alternar entre "Escrevendo" e "Rolando"). Sem caneta (só dedo ou mouse), o desenho continua pegando tudo.
+  // "barOn" = a barra de ferramentas está visível (some sozinha quando você só digita, no modo automático).
   const [penNear, setPenNear] = useState(false);
+  const [penEver, setPenEver] = useState(false);
   const [barOn, setBarOn] = useState(true);
   const penNearTimerRef = useRef(0);
   const barTimerRef = useRef(0);
@@ -582,31 +586,41 @@ export default function InkOverlay({
       showBar();
     } else {
       window.clearTimeout(barTimerRef.current);
-      window.clearTimeout(penNearTimerRef.current);
       setBarOn(true);
+    }
+    if (!active) {
+      window.clearTimeout(penNearTimerRef.current);
       setPenNear(false);
     }
   }, [active, auto, showBar]);
 
-  // Caneta automática: enquanto a caneta está perto da página, o desenho captura só ela.
-  // Sem a caneta por perto, dedo e teclado voltam a mexer no texto (tocar para digitar, arrastar para rolar).
+  // Caneta e dedo com papéis diferentes (modo clássico e automático): enquanto a caneta está perto da página,
+  // o desenho captura só ela; sem a caneta por perto, o dedo rola a página (e, no modo automático, também digita).
+  // Assim não precisa tocar na barra para alternar entre escrever e rolar.
   useEffect(() => {
     const host = canvasRef.current?.parentElement;
-    if (!host || !active || !auto) return;
-    const onNear = (e: PointerEvent) => {
-      if (e.pointerType !== "pen") return;
-      window.clearTimeout(penNearTimerRef.current);
-      penNearTimerRef.current = 0;
-      setPenNear(true);
-      showBar();
-    };
-    const onFar = (e: PointerEvent) => {
-      if (e.pointerType !== "pen" || pointerRef.current !== null) return;
+    if (!host || !active) return;
+    // Caneta afastada: a conversão automática volta a contar a pausa e o dedo volta a rolar.
+    const goFar = (delay: number) => {
       window.clearTimeout(penNearTimerRef.current);
       penNearTimerRef.current = window.setTimeout(() => {
         penNearTimerRef.current = 0;
+        if (pointerRef.current !== null) return; // ainda está no meio de um traço
         setPenNear(false);
-      }, PEN_AWAY_MS);
+        penHoverRef.current = false;
+        if (autoOnRef.current && pendingRef.current.size > 0) armAuto();
+      }, delay);
+    };
+    const onNear = (e: PointerEvent) => {
+      if (e.pointerType !== "pen") return;
+      setPenEver(true);
+      setPenNear(true);
+      if (auto) showBar();
+      goFar(PEN_IDLE_MS); // se a caneta parar de dar sinal (saiu do alcance sem avisar), o dedo volta a rolar
+    };
+    const onFar = (e: PointerEvent) => {
+      if (e.pointerType !== "pen" || pointerRef.current !== null) return;
+      goFar(PEN_AWAY_MS);
     };
     host.addEventListener("pointermove", onNear, { passive: true });
     host.addEventListener("pointerdown", onNear, { passive: true });
@@ -615,7 +629,9 @@ export default function InkOverlay({
       host.removeEventListener("pointermove", onNear);
       host.removeEventListener("pointerdown", onNear);
       host.removeEventListener("pointerleave", onFar);
+      window.clearTimeout(penNearTimerRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, auto, show, showBar]);
 
   const commit = (next: LayerItem[], base: LayerItem[]) => {
@@ -1274,8 +1290,11 @@ export default function InkOverlay({
   };
   const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
 
-  // Modo automático: o desenho só captura a caneta (e só quando ela está perto); no modo clássico captura tudo.
-  const capture = active && writing && (!auto || penNear);
+  // Caneta e dedo com papéis diferentes: se existe caneta (modo automático, ou uma caneta já foi detectada),
+  // o desenho só captura a caneta, e só quando ela está perto; o dedo rola a página. Sem caneta (só dedo ou mouse),
+  // o desenho captura tudo, como antes. Com algo selecionado no laço, o dedo continua podendo mover/redimensionar a seleção.
+  const penGate = auto || penEver;
+  const capture = active && writing && (!penGate || penNear || (tool === "lasso" && selIds.length > 0));
   // Modo automático: a barra some sozinha enquanto você só digita (e volta quando a caneta se aproxima ou ao tocar no ✍).
   const barVisible = !auto || barOn || convOpen || enhance || selIds.length > 0 || !!autoMsg || convBusy;
 
