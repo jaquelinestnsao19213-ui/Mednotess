@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import AuthGate from "@/components/AuthGate";
+import { PageLayoutApply } from "@/components/editor/PageLayout";
 import "./globals.css";
 import "./dashboard.css";
 import "./resource-library.css";
@@ -10,6 +11,7 @@ import "./tables.css";
 import "./topics.css";
 import "./notebook-ux.css";
 import "./pdf-select.css";
+import "./page-layout.css";
 
 export const metadata: Metadata = {
   title: "Meus cadernos",
@@ -26,6 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="pt-BR">
       <body>
+        <PageLayoutApply />
         <AuthGate>{children}</AuthGate>
       </body>
     </html>

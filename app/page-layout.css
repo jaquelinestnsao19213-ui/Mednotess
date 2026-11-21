@@ -1,0 +1,13 @@
+/* Largura da área de escrita e espaço entre parágrafos (escolhidos em Aa > Largura da página) */
+html[data-pw="narrow"] .shell:has(.editor) { max-width: 600px; }
+html[data-pw="wide"] .shell:has(.editor) { max-width: 960px; }
+html[data-pw="full"] .shell:has(.editor) { max-width: none; }
+html[data-pg="compact"] .tiptap > * + * { margin-top: 0.25em; }
+html[data-pg="airy"] .tiptap > * + * { margin-top: 1em; }
+
+/* Tabelas no celular: colunas com largura legível e rolagem para o lado, em vez de espremer tudo na tela */
+@media (max-width: 640px) {
+  .tiptap table { table-layout: auto; width: max-content; min-width: 100%; }
+  .tiptap th, .tiptap td { min-width: 120px; max-width: 280px; overflow-wrap: anywhere; }
+  .tiptap .tableWrapper { overscroll-behavior-x: contain; }
+}

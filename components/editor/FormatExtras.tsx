@@ -1,6 +1,7 @@
 "use client";
 
 import type { Editor } from "@tiptap/core";
+import { PageLayoutPicker } from "./PageLayout";
 
 const FONTS: { name: string; v: string | null }[] = [
   { name: "Padrão", v: null },
@@ -31,6 +32,7 @@ export function FontFamilyPicker({ editor }: { editor: Editor }) {
           </button>
         ))}
       </div>
+      <PageLayoutPicker />
     </>
   );
 }
