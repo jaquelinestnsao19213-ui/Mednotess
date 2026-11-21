@@ -77,6 +77,7 @@ function PdfPageView(p: PageProps) {
 
   const wrap = useRef<HTMLDivElement>(null);
   const pdfCanvas = useRef<HTMLCanvasElement>(null);
+  const markCanvas = useRef<HTMLCanvasElement>(null);
   const baseCanvas = useRef<HTMLCanvasElement>(null);
   const liveCanvas = useRef<HTMLCanvasElement>(null);
   const textDiv = useRef<HTMLDivElement>(null);
@@ -188,18 +189,25 @@ function PdfPageView(p: PageProps) {
     const W = Math.max(1, Math.round(width * dpr));
     const H = Math.max(1, Math.round(height * dpr));
     const base = baseCanvas.current;
+    const mark = markCanvas.current;
     const live = liveCanvas.current;
-    if (!base || !live) return;
+    if (!base || !mark || !live) return;
     if (base.width !== W || base.height !== H) {
       base.width = W;
       base.height = H;
+    }
+    if (mark.width !== W || mark.height !== H) {
+      mark.width = W;
+      mark.height = H;
     }
     if (live.width !== W || live.height !== H) {
       live.width = W;
       live.height = H;
     }
     const ctx = base.getContext("2d");
-    if (ctx) drawItems(ctx, p.ann.items, W, H);
+    if (ctx) drawItems(ctx, p.ann.items, W, H, "rest");
+    const mctx = mark.getContext("2d");
+    if (mctx) drawItems(mctx, p.ann.items, W, H, "marker");
   }, [active, width, height, p.ann.items]);
 
   function paintLive() {
@@ -506,6 +514,7 @@ function PdfPageView(p: PageProps) {
       {active ? (
         <>
           <canvas ref={pdfCanvas} className="pdfpage-pdf" />
+          <canvas ref={markCanvas} className="pdfpage-mark" />
           <canvas ref={baseCanvas} className="pdfpage-ink" />
           <canvas
             ref={liveCanvas}
