@@ -5,11 +5,11 @@ import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, ty
 import { hitItem, isMarker } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
-import { recognizeInk } from "./ink-recognize";
+import { recognizeInk, shapeIds, type Anchor } from "./ink-recognize";
 import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
-import { drawText, hitText, isInkLike, loadHandwritingFonts, textFromLine, textInPoly, unionBox, type LayerItem, type TextItem } from "./ink-text";
+import { drawText, hitText, isInkLike, loadHandwritingFonts, textBounds, textFromLine, textInPoly, unionBox, type LayerItem, type TextItem } from "./ink-text";
 
 // Camada de escrita sobre a página inteira. Fica separada do texto (o conteúdo não muda) e é guardada
 // junto com a página na chave "inkLayer". Posições: x e y divididos pela LARGURA da página; y conta a partir do topo.
@@ -530,6 +530,15 @@ export default function InkOverlay({
     return list[colorIdx] ?? list[0];
   };
 
+  // Textos já convertidos (em pixels): contam como vizinhos para saber se um traço é hífen no meio de uma palavra ou um traço solto.
+  const textAnchors = (w: number): Anchor[] =>
+    itemsRef.current
+      .filter((it): it is TextItem => it.kind === "text")
+      .map((t) => {
+        const b = textBounds(t, w);
+        return { left: b[0] * w, top: b[1] * w, right: b[2] * w, bottom: b[3] * w };
+      });
+
   // Conversão automática: lê a escrita recente, troca os traços por texto na fonte escolhida (um item por linha).
   // A contagem da pausa só começa quando a S Pen sai da área de escrita: pairando, mesmo parada, ela espera.
   const armAuto = () => {
@@ -545,7 +554,8 @@ export default function InkOverlay({
 
   // "only": converte só estes traços (a linha que ficou para trás, ou o que você mandou converter); sem ele, converte tudo o que está esperando.
   // O que não for convertido (falha de rede, linha não reconhecida) continua na fila para outra tentativa.
-  const runAuto = async (only?: Set<string>) => {
+  // Setas, traços soltos, linhas longas e círculos não são letras: ficam como desenho e não entram na fila.
+  const runAuto = async (only?: Set<string>, manual = false) => {
     if (autoBusyRef.current) {
       if (only) only.forEach((id) => pendingRef.current.add(id));
       armAuto();
@@ -560,10 +570,17 @@ export default function InkOverlay({
       src.forEach((it) => pendingRef.current.add(it.id));
       return;
     }
+    const anchors = textAnchors(w);
+    const shapes = shapeIds(src, w, anchors);
+    const work = shapes.size ? src.filter((it) => !shapes.has(it.id)) : src;
+    if (!work.length) {
+      if (manual) setAutoMsg("Só há setas, traços ou desenhos aqui: eles ficam como estão.");
+      return;
+    }
     autoBusyRef.current = true;
     setAutoMsg("Convertendo…");
     try {
-      const { lines, failed } = await recognizeInk(src, w);
+      const { lines, failed } = await recognizeInk(work, w, anchors);
       const font = CONV_FONTS[convFontRef.current].v;
       const base = itemsRef.current;
       const gone = new Set(lines.flatMap((l) => l.ids));
@@ -580,7 +597,7 @@ export default function InkOverlay({
         else fresh.push(textFromLine(l, w, font));
       }
       // Ponto ou vírgula escritos sozinhos depois da conversão: vão para o fim do texto da mesma linha.
-      for (const it of src) {
+      for (const it of work) {
         if (gone.has(it.id)) continue;
         const b = boundsOf([it], new Set([it.id]));
         if (!b) continue;
@@ -600,7 +617,7 @@ export default function InkOverlay({
       }
       // Tudo o que não foi convertido continua na fila, disponível para uma nova tentativa.
       const stillPresent = new Set(itemsRef.current.filter(isInkLike).map((it) => it.id));
-      const remaining = src.filter((it) => !gone.has(it.id) && stillPresent.has(it.id));
+      const remaining = work.filter((it) => !gone.has(it.id) && stillPresent.has(it.id));
       remaining.forEach((it) => pendingRef.current.add(it.id));
       if (gone.size || fresh.length || updated.size) {
         fadeRef.current = {
@@ -622,7 +639,7 @@ export default function InkOverlay({
     } catch (e) {
       // Erro de rede ou do serviço: a escrita continua na página e volta para a fila.
       const stillPresent = new Set(itemsRef.current.filter(isInkLike).map((it) => it.id));
-      src.forEach((it) => {
+      work.forEach((it) => {
         if (stillPresent.has(it.id)) pendingRef.current.add(it.id);
       });
       setAutoMsg(e instanceof Error ? `${e.message} Sua escrita foi preservada.` : "Falha na conversão. Sua escrita foi preservada.");
@@ -645,7 +662,7 @@ export default function InkOverlay({
     }
     stopAuto();
     setSelection([]);
-    void runAuto(new Set(src.map((it) => it.id)));
+    void runAuto(new Set(src.map((it) => it.id)), true);
   };
 
   const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1019,9 +1036,9 @@ export default function InkOverlay({
     setConvBusy(true);
     setConvErr(null);
     try {
-      const { lines, failed } = await recognizeInk(src, size.w);
+      const { lines, failed } = await recognizeInk(src, size.w, textAnchors(size.w));
       if (!lines.length) {
-        setConvErr("Não encontrei escrita de caneta para converter (marca-texto e círculos são ignorados).");
+        setConvErr("Não encontrei escrita de caneta para converter (marca-texto, setas, traços soltos e círculos ficam de fora).");
         return;
       }
       setConvText(lines.map((l) => l.text).join("\n"));
@@ -1241,7 +1258,7 @@ export default function InkOverlay({
                         <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
                       </div>
                       <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                        Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Desenhos também podem ser convertidos sem querer; ↶ desfaz. Precisa de internet.
+                        Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Setas, traços soltos, linhas e círculos ficam como desenho e não viram texto; ↶ desfaz. Precisa de internet.
                       </p>
                     </>
                   )}
