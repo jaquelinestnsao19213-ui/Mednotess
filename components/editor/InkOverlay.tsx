@@ -16,6 +16,10 @@ import { drawText, hitText, isInkLike, loadHandwritingFonts, textFromLine, textI
 // Além dos traços, a camada guarda os textos digitados criados pela conversão automática.
 export type InkLayer = { items: LayerItem[]; smooth: number };
 
+// Aviso do editor: o texto digitado cresceu ou encolheu "dy" pixels a partir da altura "y" (em pixels, a contar do topo da página).
+// Tudo o que está escrito à mão abaixo desse ponto acompanha o texto. "n" muda a cada aviso.
+export type InkReflow = { n: number; y: number; dy: number };
+
 export function readInkLayer(value: unknown): InkLayer {
   const v = value as { items?: unknown; smooth?: unknown } | null | undefined;
   const items = v && Array.isArray(v.items) ? (v.items as LayerItem[]) : [];
@@ -40,17 +44,26 @@ const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
+const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
+const BAR_IDLE_MS = 6000; // modo automático: a barra de ferramentas some depois desse tempo sem a caneta
 
 export default function InkOverlay({
   layer,
   onChange,
   active,
   onClose,
+  auto = false,
+  onAutoChange,
+  reflow = null,
 }: {
   layer: InkLayer;
   onChange: (next: InkLayer) => void;
   active: boolean;
   onClose: () => void;
+  // Caneta automática: a caneta escreve direto; dedo e teclado continuam digitando e rolando a página.
+  auto?: boolean;
+  onAutoChange?: (v: boolean) => void;
+  reflow?: InkReflow | null;
 }) {
   // Duas camadas de desenho: "canvasRef" guarda tudo o que já está pronto; "liveRef" recebe só o traço
   // que está sendo escrito (desenhado aos poucos, sem redesenhar a página inteira a cada movimento).
@@ -70,6 +83,14 @@ export default function InkOverlay({
   const [enhance, setEnhance] = useState(false);
   const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
+
+  // Caneta automática: "penNear" = a caneta está sobre a página (o desenho captura só a caneta);
+  // "barOn" = a barra de ferramentas está visível (some sozinha quando você só digita).
+  const [penNear, setPenNear] = useState(false);
+  const [barOn, setBarOn] = useState(true);
+  const penNearTimerRef = useRef(0);
+  const barTimerRef = useRef(0);
+  const lastReflowRef = useRef(0);
 
   // Converter escrita em texto digitado
   const [convOpen, setConvOpen] = useState(false);
@@ -333,6 +354,8 @@ export default function InkOverlay({
       cancelAnimationFrame(rafRef.current);
       cancelAnimationFrame(liveRafRef.current);
       cancelAnimationFrame(fadeLoopRef.current);
+      window.clearTimeout(penNearTimerRef.current);
+      window.clearTimeout(barTimerRef.current);
     },
     []
   );
@@ -499,6 +522,57 @@ export default function InkOverlay({
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
 
+  // Mostra a barra de ferramentas e programa o sumiço dela (só no modo automático).
+  const showBar = useCallback(() => {
+    setBarOn(true);
+    window.clearTimeout(barTimerRef.current);
+    barTimerRef.current = window.setTimeout(() => {
+      barTimerRef.current = 0;
+      setBarOn(false);
+    }, BAR_IDLE_MS);
+  }, []);
+
+  useEffect(() => {
+    if (active && auto) {
+      showBar();
+    } else {
+      window.clearTimeout(barTimerRef.current);
+      window.clearTimeout(penNearTimerRef.current);
+      setBarOn(true);
+      setPenNear(false);
+    }
+  }, [active, auto, showBar]);
+
+  // Caneta automática: enquanto a caneta está perto da página, o desenho captura só ela.
+  // Sem a caneta por perto, dedo e teclado voltam a mexer no texto (tocar para digitar, arrastar para rolar).
+  useEffect(() => {
+    const host = canvasRef.current?.parentElement;
+    if (!host || !active || !auto) return;
+    const onNear = (e: PointerEvent) => {
+      if (e.pointerType !== "pen") return;
+      window.clearTimeout(penNearTimerRef.current);
+      penNearTimerRef.current = 0;
+      setPenNear(true);
+      showBar();
+    };
+    const onFar = (e: PointerEvent) => {
+      if (e.pointerType !== "pen" || pointerRef.current !== null) return;
+      window.clearTimeout(penNearTimerRef.current);
+      penNearTimerRef.current = window.setTimeout(() => {
+        penNearTimerRef.current = 0;
+        setPenNear(false);
+      }, PEN_AWAY_MS);
+    };
+    host.addEventListener("pointermove", onNear, { passive: true });
+    host.addEventListener("pointerdown", onNear, { passive: true });
+    host.addEventListener("pointerleave", onFar, { passive: true });
+    return () => {
+      host.removeEventListener("pointermove", onNear);
+      host.removeEventListener("pointerdown", onNear);
+      host.removeEventListener("pointerleave", onFar);
+    };
+  }, [active, auto, show, showBar]);
+
   const commit = (next: LayerItem[], base: LayerItem[]) => {
     undoRef.current.push(base);
     if (undoRef.current.length > 60) undoRef.current.shift();
@@ -507,6 +581,50 @@ export default function InkOverlay({
     queuePush();
     setTick((t) => t + 1);
   };
+
+  // O texto digitado cresceu (ou encolheu): a escrita que está abaixo do ponto onde você digitou acompanha o texto.
+  // O histórico (↶ ↷) recebe o mesmo deslocamento, para o desfazer não devolver a escrita ao lugar antigo.
+  useEffect(() => {
+    if (!reflow || reflow.n === lastReflowRef.current) return;
+    lastReflowRef.current = reflow.n;
+    const w = sizeRef.current.w;
+    if (!w || !itemsRef.current.length) return;
+    const y0 = (reflow.y - 4) / w;
+    let dy = reflow.dy / w;
+    const topOf = (it: LayerItem): number | null => {
+      const b = unionBox([it], new Set([it.id]), w);
+      return b ? b[1] : null;
+    };
+    if (dy < 0) {
+      // Ao encolher, nada sobe além do topo da página.
+      let minTop = Infinity;
+      for (const it of itemsRef.current) {
+        const t = topOf(it);
+        if (t !== null && t >= y0) minTop = Math.min(minTop, t);
+      }
+      if (minTop === Infinity) return;
+      dy = Math.max(dy, -minTop);
+    }
+    if (Math.abs(dy) * w < 1) return;
+    const shift = (list: LayerItem[]): LayerItem[] =>
+      list.map((it): LayerItem => {
+        const t = topOf(it);
+        if (t === null || t < y0) return it;
+        return it.kind === "text" ? { ...it, y: it.y + dy } : moveItem(it, 0, dy);
+      });
+    itemsRef.current = shift(itemsRef.current);
+    undoRef.current = undoRef.current.map(shift);
+    redoRef.current = redoRef.current.map(shift);
+    fadeRef.current = null;
+    if (selRef.current.size) {
+      selRef.current = new Set();
+      setSelIds([]);
+    }
+    queuePush();
+    schedule();
+    setTick((t) => t + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reflow]);
 
   const toPoint = (clientX: number, clientY: number): [number, number] => {
     const r = canvasRef.current!.getBoundingClientRect();
@@ -1082,6 +1200,11 @@ export default function InkOverlay({
   };
   const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
 
+  // Modo automático: o desenho só captura a caneta (e só quando ela está perto); no modo clássico captura tudo.
+  const capture = active && writing && (!auto || penNear);
+  // Modo automático: a barra some sozinha enquanto você só digita (e volta quando a caneta se aproxima ou ao tocar no ✍).
+  const barVisible = !auto || barOn || convOpen || enhance || selIds.length > 0 || !!autoMsg || convBusy;
+
   if (!show) return null;
 
   return (
@@ -1101,9 +1224,9 @@ export default function InkOverlay({
           width: "100%",
           height: "100%",
           zIndex: 5,
-          pointerEvents: active && writing ? "auto" : "none",
-          touchAction: active && writing ? "none" : "auto",
-          cursor: active && writing ? "crosshair" : "default",
+          pointerEvents: capture ? "auto" : "none",
+          touchAction: capture ? "none" : "auto",
+          cursor: capture ? "crosshair" : "default",
         }}
       />
       {/* Camada do marca-texto: fica atrás da escrita e se mistura com o texto da página (o texto continua escuro por cima da cor). */}
@@ -1137,15 +1260,44 @@ export default function InkOverlay({
           mixBlendMode: tool === "highlighter" ? "multiply" : "normal",
         }}
       />
-      {active && (
+      {active && !barVisible && (
+        <button
+          type="button"
+          aria-label="Mostrar as ferramentas de escrita à mão"
+          onClick={showBar}
+          style={{
+            position: "fixed",
+            right: 12,
+            bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 12px + env(safe-area-inset-bottom, 0px))",
+            zIndex: 60,
+            width: 44,
+            height: 44,
+            borderRadius: "50%",
+            border: "1px solid var(--line, #d5dbe3)",
+            background: "var(--card, #fff)",
+            boxShadow: "0 4px 16px rgba(0,0,0,.18)",
+            fontSize: 20,
+          }}
+        >
+          ✍
+        </button>
+      )}
+      {active && barVisible && (
         <div
           role="toolbar"
           aria-label="Escrita sobre a página"
+          onPointerDown={() => {
+            if (auto) showBar();
+          }}
+          onMouseDown={(e) => {
+            // No modo automático, tocar nas ferramentas não tira o cursor (nem fecha o teclado) do texto.
+            if (auto && !(e.target as HTMLElement).closest("textarea,input,select")) e.preventDefault();
+          }}
           style={{
             position: "fixed",
             left: 8,
             right: 8,
-            bottom: "calc(var(--kb, 0px) + 8px + env(safe-area-inset-bottom, 0px))",
+            bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 8px + env(safe-area-inset-bottom, 0px))",
             zIndex: 60,
             display: "grid",
             gap: 4,
@@ -1375,6 +1527,20 @@ export default function InkOverlay({
             >
               {writing ? "✍ Escrevendo" : "✋ Rolando"}
             </button>
+            {onAutoChange && (
+              <button
+                type="button"
+                aria-label={
+                  auto
+                    ? "Caneta automática ligada: a caneta escreve direto; dedo e teclado digitam. Toque para desligar"
+                    : "Ligar a caneta automática: a caneta escreve direto; dedo e teclado digitam"
+                }
+                style={btn(auto)}
+                onClick={() => onAutoChange(!auto)}
+              >
+                {auto ? "⚡ Auto" : "⚡"}
+              </button>
+            )}
             <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
             <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
@@ -1397,14 +1563,14 @@ export default function InkOverlay({
             <button type="button" aria-label="Apagar toda a escrita sobre a página" style={btn()} onClick={clearAll}>Limpar</button>
             <button
               type="button"
-              aria-label="Concluir e voltar a editar o texto"
+              aria-label={auto ? "Pausar a caneta e voltar só ao texto" : "Concluir e voltar a editar o texto"}
               style={{ ...btn(), fontWeight: 700 }}
               onClick={() => {
                 flushPush();
                 onClose();
               }}
             >
-              Concluir
+              {auto ? "Pausar" : "Concluir"}
             </button>
           </div>
           {drawing && (
