@@ -12,11 +12,14 @@ import type { PageRow } from "@/lib/types";
 import PageAssistant from "@/components/PageAssistant";
 import SubpagesTable from "@/components/SubpagesTable";
 import PageMovePicker from "@/components/PageMovePicker";
+import SharePanel from "@/components/SharePanel";
 import { deletePages, deletionMessage, movePage, planDeletion } from "@/lib/page-ops";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
 type Crumb = { id: string; title: string };
+// share_token só existe depois de executar o schema21.sql
+type SharedPageRow = PageRow & { share_token?: string | null };
 
 export default function PageRoute() {
   const { id } = useParams<{ id: string }>();
@@ -25,7 +28,7 @@ export default function PageRoute() {
 
 function PageView({ id }: { id: string }) {
   const router = useRouter();
-  const [page, setPage] = useState<PageRow | null>(null);
+  const [page, setPage] = useState<SharedPageRow | null>(null);
   const [children, setChildren] = useState<PageRow[]>([]);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [status, setStatus] = useState<"saved" | "saving">("saved");
@@ -127,7 +130,7 @@ function PageView({ id }: { id: string }) {
     (async () => {
       const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
       if (!row) return setNotFound(true);
-      const current = row as PageRow;
+      const current = row as SharedPageRow;
       setPage(current);
 
       await loadChildren();
@@ -266,6 +269,12 @@ function PageView({ id }: { id: string }) {
   />
 </div>
       <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
+      <SharePanel
+        pageId={page.id}
+        pageTitle={page.title}
+        token={page.share_token ?? null}
+        onToken={(token) => setPage((current) => (current ? { ...current, share_token: token } : current))}
+      />
       {error && <p className="notice">{error}</p>}
 
       {isLesson && (
