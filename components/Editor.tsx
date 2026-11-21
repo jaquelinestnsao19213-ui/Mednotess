@@ -32,6 +32,7 @@ import { richClipboard } from "@/lib/copy-html";
 import { exportEditorAsPdf } from "@/lib/export-pdf";
 import { cleanClipboardHTML } from "@/lib/clipboard-clean";
 import { looksLikeMarkdown, markdownToHtml } from "@/lib/markdown-paste";
+import "@/app/bubble-touch.css";
 
 type Cmd = { label: string; keywords: string; run: (e: TipEditor) => void };
 
@@ -106,6 +107,10 @@ export default function Editor({
   const [videoLinkBox, setVideoLinkBox] = useState(false);
   const [videoLinkValue, setVideoLinkValue] = useState("");
   const [videoLinkError, setVideoLinkError] = useState<string | null>(null);
+
+  // Barrinha de seleção: no toque, fica escondida enquanto a seleção ainda está sendo arrastada.
+  const [holding, setHolding] = useState(false);
+  const holdTimer = useRef<number | undefined>(undefined);
 
   // Camada de escrita à mão sobre a página inteira (guardada junto com a página, na chave inkLayer).
   const [layer, setLayer] = useState<InkLayer>(() => readInkLayer(initial.inkLayer));
@@ -186,6 +191,14 @@ export default function Editor({
     item.run(e);
   }
 
+  // No toque (tablet/celular) esconde a barrinha enquanto a seleção ainda muda; ela volta quando o dedo para de arrastar.
+  function holdBubble() {
+    if (typeof window === "undefined" || !window.matchMedia?.("(pointer: coarse)").matches) return;
+    setHolding(true);
+    window.clearTimeout(holdTimer.current);
+    holdTimer.current = window.setTimeout(() => setHolding(false), 450);
+  }
+
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -225,7 +238,10 @@ export default function Editor({
       onChangeRef.current(withLayer(editor.getJSON()));
       checkSlash(editor);
     },
-    onSelectionUpdate: ({ editor }) => checkSlash(editor),
+    onSelectionUpdate: ({ editor }) => {
+      checkSlash(editor);
+      holdBubble();
+    },
     onFocus: () => setFocused(true),
     onBlur: () => {
       setFocused(false);
@@ -335,6 +351,8 @@ export default function Editor({
       vv.removeEventListener("scroll", set);
     };
   }, []);
+
+  useEffect(() => () => window.clearTimeout(holdTimer.current), []);
 
   async function insertImages(files: File[], pos?: number) {
     const e = editorRef.current;
@@ -450,6 +468,43 @@ export default function Editor({
     if (ok) window.setTimeout(() => setMessage((m) => (m && m.startsWith("Página copiada") ? null : m)), 5000);
   }
 
+  // Botão "Copiar" da barrinha de seleção: copia só o trecho selecionado, com a formatação.
+  async function copySelection() {
+    const e = editorRef.current;
+    if (!e || e.state.selection.empty) return;
+    const { html, text } = richClipboard(e.view, e.state.selection.content());
+    let ok = false;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) })]);
+      ok = true;
+    } catch {
+      // navegador sem ClipboardItem: usa o comando antigo de copiar numa cópia invisível
+      const holder = document.createElement("div");
+      holder.contentEditable = "true";
+      holder.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      holder.innerHTML = html;
+      document.body.append(holder);
+      const range = document.createRange();
+      range.selectNodeContents(holder);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      ok = document.execCommand("copy");
+      sel?.removeAllRanges();
+      holder.remove();
+    }
+    setMessage(ok ? "Texto copiado." : "Não foi possível copiar. Toque e segure no texto e use o menu do aparelho.");
+    if (ok) window.setTimeout(() => setMessage((m) => (m === "Texto copiado." ? null : m)), 2500);
+  }
+
+  // Botão "Parágrafo" da barrinha de seleção: seleciona o parágrafo inteiro onde a seleção está.
+  function selectParagraph() {
+    const e = editorRef.current;
+    if (!e) return;
+    const { $from } = e.state.selection;
+    e.chain().focus().setTextSelection({ from: $from.start(), to: $from.end() }).run();
+  }
+
   // Botão "Colar imagem": lê a área de transferência (precisa de toque do usuário e HTTPS).
   async function pasteImageFromClipboard() {
     try {
@@ -521,6 +576,8 @@ export default function Editor({
   if (!editor) return null;
   const chain = () => editor.chain().focus();
   const keep = (e: React.MouseEvent) => e.preventDefault();
+  // No toque, a barrinha abre embaixo da seleção (em cima fica o menu do próprio aparelho).
+  const coarse = typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches;
 
   const chip = (label: string, run: () => void, active = false, aria?: string) => (
     <button type="button" key={label} aria-label={aria ?? label} className={active ? "chip on" : "chip"} onClick={run}>
@@ -531,8 +588,13 @@ export default function Editor({
 
   return (
     <div className="editor">
-      <BubbleMenu editor={editor} tippyOptions={{ duration: 100, placement: "top" }}>
-        <div className="bubble" onMouseDown={keep}>
+      <BubbleMenu
+        editor={editor}
+        tippyOptions={{ duration: 100, placement: coarse ? "bottom" : "top", offset: coarse ? [0, 44] : [0, 10], maxWidth: "none" }}
+      >
+        <div className={holding ? "bubble is-hold" : "bubble"} onMouseDown={keep}>
+          <button type="button" aria-label="Copiar texto selecionado" className="txt" onClick={() => { void copySelection(); }}>Copiar</button>
+          <button type="button" aria-label="Selecionar o parágrafo inteiro" className="txt" onClick={selectParagraph}>Parágrafo</button>
           <button type="button" aria-label="Negrito" className={editor.isActive("bold") ? "on" : ""} onClick={() => chain().toggleBold().run()}><b>B</b></button>
           <button type="button" aria-label="Itálico" className={editor.isActive("italic") ? "on" : ""} onClick={() => chain().toggleItalic().run()}><i>I</i></button>
           <button type="button" aria-label="Sublinhado" className={editor.isActive("underline") ? "on" : ""} onClick={() => chain().toggleUnderline().run()}><u>U</u></button>

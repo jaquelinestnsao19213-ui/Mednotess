@@ -1,0 +1,12 @@
+/* ---------- Barrinha de seleção do caderno: toque (tablet e celular) ---------- */
+
+/* Enquanto o dedo ainda arrasta as alças da seleção, a barrinha fica escondida (sem sair do lugar) e volta quando a seleção para. */
+.editor .bubble.is-hold { visibility: hidden; pointer-events: none; }
+
+.editor .bubble button.txt { min-width: 0; padding: 0 10px; font-size: 0.85rem; white-space: nowrap; }
+
+@media (pointer: coarse) {
+  .editor .bubble { flex-wrap: wrap; justify-content: center; max-width: 92vw; }
+  .editor .bubble button { min-width: 44px; height: 44px; }
+  .editor .bubble button.txt { min-width: 0; }
+}
