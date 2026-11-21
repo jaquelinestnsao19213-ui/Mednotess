@@ -3,7 +3,19 @@ import type { InkItem, Item } from "../pdf/types";
 // Converte a escrita à mão (traços da caneta) em texto, uma linha por vez.
 // Os traços são agrupados em linhas pela posição vertical e enviados a /api/handwriting.
 
-export type Recognized = { text: string; ids: string[]; left: number; top: number; right: number; bottom: number; color: string };
+// "items" são os traços originais da linha (o manuscrito): quem converte guarda esses traços junto do texto,
+// para nunca perder a letra à mão. "alts" são outras leituras possíveis, usadas para corrigir erros com um toque.
+export type Recognized = {
+  text: string;
+  ids: string[];
+  items: InkItem[];
+  alts: string[];
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  color: string;
+};
 
 type Stroke = { item: InkItem; order: number; left: number; right: number; top: number; bottom: number; cy: number };
 type Group = { items: InkItem[]; left: number; right: number; top: number; bottom: number };
@@ -149,8 +161,9 @@ export async function recognizeInk(items: Item[], pageW: number): Promise<{ line
     }
     throw new Error(msg);
   }
-  const data = (await res.json()) as { lines?: (string | null)[] };
+  const data = (await res.json()) as { lines?: (string | null)[]; alts?: unknown };
   const texts = data.lines ?? [];
+  const altsAll = Array.isArray(data.alts) ? (data.alts as unknown[]) : [];
   const lines: Recognized[] = [];
   let failed = 0;
   groups.forEach((g, i) => {
@@ -159,7 +172,19 @@ export async function recognizeInk(items: Item[], pageW: number): Promise<{ line
       failed += 1;
       return;
     }
-    lines.push({ text, ids: g.items.map((it) => it.id), left: g.left, top: g.top, right: g.right, bottom: g.bottom, color: g.items[0].color });
+    const rawAlts = altsAll[i];
+    const alts = Array.isArray(rawAlts) ? rawAlts.filter((a): a is string => typeof a === "string" && !!a.trim() && a !== text).slice(0, 4) : [];
+    lines.push({
+      text,
+      ids: g.items.map((it) => it.id),
+      items: g.items,
+      alts,
+      left: g.left,
+      top: g.top,
+      right: g.right,
+      bottom: g.bottom,
+      color: g.items[0].color,
+    });
   });
   if (!lines.length) {
     throw new Error("O reconhecedor gratuito do Google não respondeu agora. Tente de novo em instantes.");
