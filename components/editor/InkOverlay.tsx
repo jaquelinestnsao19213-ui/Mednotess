@@ -9,11 +9,26 @@ import { recognizeInk } from "./ink-recognize";
 import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
-import { drawText, hitText, isInkLike, loadHandwritingFonts, textFromLine, textInPoly, unionBox, type LayerItem, type TextItem } from "./ink-text";
+import {
+  drawText,
+  hitText,
+  isInkLike,
+  loadHandwritingFonts,
+  restoreStrokes,
+  srcOffset,
+  textFromLine,
+  textInPoly,
+  textWidth,
+  unionBox,
+  type LayerItem,
+  type TextItem,
+} from "./ink-text";
 
 // Camada de escrita sobre a página inteira. Fica separada do texto (o conteúdo não muda) e é guardada
 // junto com a página na chave "inkLayer". Posições: x e y divididos pela LARGURA da página; y conta a partir do topo.
 // Além dos traços, a camada guarda os textos digitados criados pela conversão automática.
+// Cada texto convertido leva junto o manuscrito original ("src"): dá para corrigir o texto, ver a letra à mão
+// por trás dele ou voltar ao manuscrito, sem perder nada.
 export type InkLayer = { items: LayerItem[]; smooth: number };
 
 export function readInkLayer(value: unknown): InkLayer {
@@ -40,6 +55,7 @@ const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
+const GHOST_ALPHA = 0.3; // transparência do manuscrito mostrado por trás do texto convertido
 
 export default function InkOverlay({
   layer,
@@ -80,6 +96,14 @@ export default function InkOverlay({
   const [convIds, setConvIds] = useState<string[]>([]);
   const [convPos, setConvPos] = useState<{ left: number; top: number } | null>(null);
   const [convErase, setConvErase] = useState(true);
+
+  // Corrigir o texto convertido e ver o manuscrito original por trás dele
+  const [showOrig, setShowOrig] = useState(false);
+  const showOrigRef = useRef(false);
+  showOrigRef.current = showOrig;
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editVal, setEditVal] = useState("");
+  const [editErr, setEditErr] = useState<string | null>(null);
 
   // Conversão automática: depois de uma pausa (que você escolhe), a escrita recente vira texto na fonte escolhida, no mesmo lugar
   const [autoOn, setAutoOn] = useState(false);
@@ -266,7 +290,18 @@ export default function InkOverlay({
     }
     for (const it of itemsRef.current) {
       if (it.kind === "text") {
-        if (fade && fade.texts.has(it.id)) {
+        const fading = !!(fade && fade.texts.has(it.id));
+        // O manuscrito original aparece esmaecido por trás do texto: com o botão 👁, ou enquanto o texto está selecionado.
+        // A posição acompanha o texto (deslocamento em relação ao lugar onde foi convertido).
+        if (it.src && (showOrigRef.current || selRef.current.has(it.id))) {
+          const { dx, dy } = srcOffset(it);
+          ctx.save();
+          ctx.globalAlpha = GHOST_ALPHA * (fading ? k : 1);
+          ctx.translate(dx * w, dy * w);
+          for (const g of it.src.items) drawInkItem(ctx, smoothItemCached(g, smooth), w);
+          ctx.restore();
+        }
+        if (fading) {
           ctx.save();
           ctx.globalAlpha = k;
           drawText(ctx, it, w);
@@ -319,6 +354,11 @@ export default function InkOverlay({
   useEffect(() => {
     paint();
   }, [paint]);
+
+  // Ligar ou desligar "ver escrita original" redesenha a página na hora.
+  useEffect(() => {
+    paintRef.current();
+  }, [showOrig]);
 
   // Mudanças vindas de fora (desfazer do editor, outra aba) atualizam o desenho.
   // O que nós mesmos enviamos ao editor não precisa ser redesenhado.
@@ -465,6 +505,12 @@ export default function InkOverlay({
     pendingRef.current = new Set();
   };
 
+  // Aviso rápido na barra de status (some sozinho).
+  const flash = (msg: string) => {
+    setAutoMsg(msg);
+    window.setTimeout(() => setAutoMsg((m) => (m === msg ? null : m)), 4500);
+  };
+
   // Ao abrir ou fechar a camada, volta ao estado inicial.
   useEffect(() => {
     if (active) {
@@ -485,6 +531,8 @@ export default function InkOverlay({
       setConvText(null);
       setConvErr(null);
       setAutoMsg(null);
+      setEditId(null);
+      setEditErr(null);
       window.clearTimeout(autoTimerRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -524,6 +572,18 @@ export default function InkOverlay({
     }
   };
 
+  // Toque com o laço (sem desenhar a volta): seleciona o item que está embaixo do dedo ou da caneta, o de cima primeiro.
+  // Assim um texto convertido é escolhido com um toque, para corrigir ou voltar ao manuscrito.
+  const pickAt = (x: number, y: number): string[] => {
+    const w = sizeRef.current.w;
+    const list = itemsRef.current;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const it = list[i];
+      if (it.kind === "text" ? hitText(it, x, y, w, 12) : hitItem(it, x, y, w, w, 12)) return [it.id];
+    }
+    return [];
+  };
+
   const colorFor = (marker: boolean): string => {
     if (colorIdx === -1) return custom;
     const list = marker ? MARK_COLORS : INK_COLORS;
@@ -545,6 +605,7 @@ export default function InkOverlay({
 
   // "only": converte só estes traços (a linha que ficou para trás, ou o que você mandou converter); sem ele, converte tudo o que está esperando.
   // O que não for convertido (falha de rede, linha não reconhecida) continua na fila para outra tentativa.
+  // Os traços convertidos não são jogados fora: ficam guardados dentro do texto (manuscrito original).
   const runAuto = async (only?: Set<string>) => {
     if (autoBusyRef.current) {
       if (only) only.forEach((id) => pendingRef.current.add(id));
@@ -575,7 +636,7 @@ export default function InkOverlay({
       // entra no mesmo texto, com o mesmo tamanho e a mesma altura, em vez de virar outro texto solto.
       for (const l of lines) {
         const mate = findMate(current(), l, w);
-        const joined = mate ? joinText(mate, l.text, /^[.,;:!?)\]]/.test(l.text), w) : null;
+        const joined = mate ? joinText(mate, l.text, /^[.,;:!?)\]]/.test(l.text), w, l.items) : null;
         if (joined) updated.set(joined.id, joined);
         else fresh.push(textFromLine(l, w, font));
       }
@@ -593,7 +654,7 @@ export default function InkOverlay({
         const small = Math.max(bw, bh) <= px * 0.4;
         const atOrBelowMiddle = (at.top + at.bottom) / 2 >= mate.y * w - px * 0.15; // acento fica acima do meio da letra
         if (!small || bw > bh * 1.8 || !atOrBelowMiddle) continue;
-        const joined = joinText(mate, bh >= bw * 1.8 ? "," : ".", true, w);
+        const joined = joinText(mate, bh >= bw * 1.8 ? "," : ".", true, w, [it]);
         if (!joined) continue;
         updated.set(joined.id, joined);
         gone.add(it.id);
@@ -854,7 +915,7 @@ export default function InkOverlay({
       const ids =
         poly.length >= 6
           ? itemsRef.current.filter((it) => (it.kind === "text" ? textInPoly(it, poly, size.w) : pickedByLasso(it, poly))).map((it) => it.id)
-          : [];
+          : pickAt(poly[0], poly[1]);
       setSelection(ids);
       return;
     }
@@ -1011,6 +1072,71 @@ export default function InkOverlay({
     schedule();
   };
 
+  // ---------- Texto convertido: corrigir sem perder o manuscrito ----------
+
+  const selectedTexts = (): TextItem[] => itemsRef.current.filter((it): it is TextItem => it.kind === "text" && selRef.current.has(it.id));
+
+  // Abre a correção do texto selecionado. O manuscrito original aparece esmaecido por trás enquanto ele estiver selecionado.
+  const startEdit = () => {
+    const ts = selectedTexts();
+    if (ts.length !== 1) return;
+    setEditId(ts[0].id);
+    setEditVal(ts[0].text);
+    setEditErr(null);
+    setConvOpen(false);
+    setEnhance(false);
+  };
+
+  const cancelEdit = () => {
+    setEditId(null);
+    setEditErr(null);
+  };
+
+  // Salva o texto corrigido no mesmo lugar. O manuscrito continua guardado e uma nova conversão não sobrescreve esta correção.
+  const saveEdit = () => {
+    const target = itemsRef.current.find((it): it is TextItem => it.kind === "text" && it.id === editId);
+    if (!target) {
+      setEditId(null);
+      return;
+    }
+    const v = editVal.replace(/\s*\n\s*/g, " ").trim();
+    if (!v) {
+      setEditErr("O texto não pode ficar vazio. Para remover, use “Excluir seleção”.");
+      return;
+    }
+    if (v === target.text) {
+      setEditId(null);
+      setEditErr(null);
+      return;
+    }
+    // Se o texto corrigido for mais comprido e passar da margem da página, a letra diminui só o necessário.
+    const w = sizeRef.current.w;
+    const px = Math.max(1, target.size * w);
+    const width = textWidth(v, px, target.font);
+    const room = w * 0.98 - target.x * w;
+    const newSize = w && width > room && room > 20 ? (px * room) / width / w : target.size;
+    const base = itemsRef.current;
+    commit(base.map((it): LayerItem => (it.kind === "text" && it.id === target.id ? { ...it, text: v, size: newSize, edited: true } : it)), base);
+    setEditId(null);
+    setEditErr(null);
+    schedule();
+    flash("Texto corrigido. O manuscrito original continua guardado.");
+  };
+
+  // Troca o texto selecionado pela letra à mão de origem, no lugar onde o texto está agora. O ↶ volta ao texto.
+  const restoreManuscript = () => {
+    const ts = selectedTexts().filter((t) => t.src);
+    if (!ts.length) return;
+    const base = itemsRef.current;
+    const drop = new Set(ts.map((t) => t.id));
+    const strokes = ts.flatMap(restoreStrokes);
+    if (!strokes.length) return;
+    commit([...base.filter((it) => !drop.has(it.id)), ...strokes], base);
+    setEditId(null);
+    setSelection(strokes.map((s) => s.id));
+    flash(ts.length === 1 ? "Voltou ao manuscrito. Toque em ↶ para voltar ao texto." : "Voltou ao manuscrito dos textos selecionados. ↶ desfaz.");
+  };
+
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
   const convert = async () => {
     if (convBusy) return;
@@ -1081,6 +1207,14 @@ export default function InkOverlay({
     flexWrap: "nowrap",
   };
   const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
+
+  // Textos convertidos: quais têm manuscrito guardado, qual está selecionado e qual está sendo corrigido.
+  const layerTexts = itemsRef.current.filter((it): it is TextItem => it.kind === "text");
+  const anySrc = layerTexts.some((t) => !!t.src);
+  const selTexts = layerTexts.filter((t) => selIds.includes(t.id));
+  const oneText = selTexts.length === 1 ? selTexts[0] : null;
+  const selHasSrc = selTexts.some((t) => !!t.src);
+  const editing = editId ? (layerTexts.find((t) => t.id === editId) ?? null) : null;
 
   if (!show) return null;
 
@@ -1192,6 +1326,76 @@ export default function InkOverlay({
               )}
             </div>
           )}
+          {editing && (
+            <div role="group" aria-label="Corrigir texto reconhecido" style={{ display: "grid", gap: 6 }}>
+              <b style={{ fontSize: 13 }}>Corrigir texto reconhecido</b>
+              <textarea
+                value={editVal}
+                autoFocus
+                aria-label="Texto reconhecido: corrija o que estiver errado"
+                onChange={(e) => {
+                  setEditVal(e.target.value);
+                  setEditErr(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    saveEdit();
+                  } else if (e.key === "Escape") {
+                    cancelEdit();
+                  }
+                }}
+                rows={2}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  minHeight: 56,
+                  padding: 8,
+                  borderRadius: 8,
+                  border: "1px solid var(--line, #d5dbe3)",
+                  fontSize: 16,
+                  fontFamily: editing.font ?? undefined,
+                  userSelect: "text",
+                  WebkitUserSelect: "text",
+                }}
+              />
+              {editing.alts && editing.alts.length > 0 && (
+                <div style={{ display: "grid", gap: 4 }}>
+                  <span style={{ fontSize: 12, opacity: 0.75 }}>Também pode ser:</span>
+                  <div style={row}>
+                    {editing.alts.map((a) => (
+                      <button
+                        type="button"
+                        key={a}
+                        aria-label={`Usar a leitura: ${a}`}
+                        style={{ ...btn(editVal === a), fontSize: 14, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        onClick={() => {
+                          setEditVal(a);
+                          setEditErr(null);
+                        }}
+                      >
+                        {a}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {editErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{editErr}</p>}
+              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                {editing.src
+                  ? "Sua letra à mão aparece esmaecida por trás do texto e continua guardada: a correção não apaga o manuscrito."
+                  : "Este texto foi convertido antes do manuscrito passar a ser guardado, então não há letra à mão para restaurar."}
+              </p>
+              <div style={row}>
+                <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={saveEdit}>
+                  Salvar correção
+                </button>
+                <button type="button" style={btn()} onClick={cancelEdit}>
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
           {convOpen && (
             <div role="group" aria-label="Converter escrita em texto" style={{ display: "grid", gap: 6 }}>
               {convText === null ? (
@@ -1253,6 +1457,9 @@ export default function InkOverlay({
                   </div>
                   <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
                     Escreva tudo o que quiser e converta no fim, no mesmo lugar. Use o ⬚ Laço para escolher só um trecho.
+                  </p>
+                  <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                    Sua letra à mão fica guardada dentro de cada texto convertido. Com o ⬚ Laço, toque no texto para corrigir um erro ou voltar ao manuscrito; o botão 👁 mostra a letra original por trás de todos os textos.
                   </p>
                   <div style={row}>
                     <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
@@ -1357,6 +1564,16 @@ export default function InkOverlay({
           )}
           {tool === "lasso" && selIds.length > 0 && (
             <div role="toolbar" aria-label="Ações da seleção" style={row}>
+              {oneText && (
+                <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={startEdit}>
+                  ✎ Editar texto
+                </button>
+              )}
+              {selHasSrc && (
+                <button type="button" style={btn()} onClick={restoreManuscript}>
+                  ↩ Voltar ao manuscrito
+                </button>
+              )}
               <button type="button" style={btn()} onClick={deleteSelection}>Excluir seleção</button>
               <button type="button" style={btn()} onClick={duplicateSelection}>Duplicar</button>
               <button type="button" style={btn()} onClick={recolorSelection}>Pintar com a cor atual</button>
@@ -1378,7 +1595,7 @@ export default function InkOverlay({
             <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
             <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
-            <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+            <button type="button" aria-label="Laço: tocar num texto ou desenhar em volta para selecionar, mover, aumentar com dois dedos, corrigir e apagar" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
             <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
             <button
               type="button"
@@ -1392,6 +1609,17 @@ export default function InkOverlay({
             >
               {autoOn ? "Aa ●" : "Aa"}
             </button>
+            {anySrc && (
+              <button
+                type="button"
+                aria-label="Mostrar a letra à mão original por trás dos textos convertidos"
+                aria-pressed={showOrig}
+                style={btn(showOrig)}
+                onClick={() => setShowOrig((v) => !v)}
+              >
+                👁
+              </button>
+            )}
             <button type="button" aria-label="Desfazer" disabled={!undoRef.current.length} style={btn(false, !undoRef.current.length)} onClick={undo}>↶</button>
             <button type="button" aria-label="Refazer" disabled={!redoRef.current.length} style={btn(false, !redoRef.current.length)} onClick={redo}>↷</button>
             <button type="button" aria-label="Apagar toda a escrita sobre a página" style={btn()} onClick={clearAll}>Limpar</button>
