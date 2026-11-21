@@ -6,6 +6,8 @@ import { hitItem, isMarker } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk, shapeIds, type Anchor } from "./ink-recognize";
+import { snapStroke } from "./ink-shapes";
+import { highlightLines } from "./ink-snap-text";
 import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
@@ -39,6 +41,7 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
 const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
+const HOLD_MS = 450; // segurar a caneta parada no fim do traço endireita a forma
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 
 export default function InkOverlay({
@@ -68,6 +71,8 @@ export default function InkOverlay({
   const [selIds, setSelIds] = useState<string[]>([]);
   const [smooth, setSmooth] = useState(layer.smooth);
   const [enhance, setEnhance] = useState(false);
+  const [shapesOn, setShapesOn] = useState(true); // formas automáticas (segurar a caneta no fim do traço)
+  const [alignMark, setAlignMark] = useState(true); // marca-texto alinhado às linhas de texto
   const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
 
@@ -93,6 +98,13 @@ export default function InkOverlay({
   convFontRef.current = convFont;
   const sizeRef = useRef(size);
   sizeRef.current = size;
+  const shapesOnRef = useRef(true);
+  shapesOnRef.current = shapesOn;
+  const alignMarkRef = useRef(true);
+  alignMarkRef.current = alignMark;
+  const holdTimerRef = useRef(0);
+  const holdAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const snapRef = useRef<Item | null>(null); // forma reconhecida enquanto a caneta está parada
   const pendingRef = useRef<Set<string>>(new Set());
   const autoTimerRef = useRef(0);
   const autoBusyRef = useRef(false);
@@ -138,7 +150,9 @@ export default function InkOverlay({
     try {
       const raw = window.localStorage.getItem(PREFS_KEY);
       if (raw) {
-        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown } | null;
+        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown; shapes?: unknown; alignMark?: unknown } | null;
+        if (p && typeof p.shapes === "boolean") setShapesOn(p.shapes);
+        if (p && typeof p.alignMark === "boolean") setAlignMark(p.alignMark);
         if (p && typeof p.convFont === "number" && Number.isInteger(p.convFont) && p.convFont >= 0 && p.convFont < CONV_FONTS.length) {
           setConvFont(p.convFont);
         }
@@ -155,11 +169,11 @@ export default function InkOverlay({
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
     try {
-      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay }));
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay, shapes: shapesOn, alignMark }));
     } catch {
       // armazenamento indisponível: a preferência vale só nesta sessão
     }
-  }, [convFont, autoDelay]);
+  }, [convFont, autoDelay, shapesOn, alignMark]);
 
   // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
   // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
@@ -352,7 +366,7 @@ export default function InkOverlay({
     const d = draftRef.current;
     const canvas = liveRef.current;
     const w = sizeRef.current.w;
-    if (!d || !canvas || !w) return;
+    if (!d || !canvas || !w || snapRef.current) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const dpr = dprRef.current;
@@ -410,6 +424,62 @@ export default function InkOverlay({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
 
+  const clearHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = 0;
+    holdAnchorRef.current = null;
+  };
+
+  // Caneta parada no fim do traço: se parece uma forma (linha, círculo, triângulo, retângulo), mostra a versão
+  // reta no lugar do traço. Ao levantar, ela é guardada; se voltar a mexer, o traço continua livre.
+  const armHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = 0;
+      const d = draftRef.current;
+      const w = sizeRef.current.w;
+      const live = liveRef.current;
+      if (!d || !w || !live || d.tool !== "pen" || !shapesOnRef.current) return;
+      const item = snapStroke(d, w);
+      const ctx = live.getContext("2d");
+      if (!item || !ctx) return;
+      snapRef.current = item;
+      clearLive();
+      ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0);
+      drawInkItem(ctx, item, w);
+      try {
+        navigator.vibrate?.(8);
+      } catch {
+        // sem vibração neste aparelho
+      }
+    }, HOLD_MS);
+  };
+
+  // Marca-texto: troca o traço torto por uma faixa reta em cada linha de texto marcada.
+  const alignHighlight = (d: InkItem): InkItem[] | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || d.pts.length < 4) return null;
+    const r = canvas.getBoundingClientRect();
+    const p = d.pts;
+    let sum = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 1; i < p.length; i += 2) {
+      const y = p[i] * r.width;
+      sum += y;
+      lo = Math.min(lo, y);
+      hi = Math.max(hi, y);
+    }
+    const s = { x: r.left + p[0] * r.width, y: r.top + p[1] * r.width };
+    const e = { x: r.left + p[p.length - 2] * r.width, y: r.top + p[p.length - 1] * r.width };
+    if (Math.abs(s.x - e.x) + Math.abs(s.y - e.y) < 12) return null;
+    if (hi - lo <= 28) {
+      // traço de uma linha só: usa a altura média, assim um traço levemente torto cai na linha certa
+      s.y = e.y = r.top + sum / (p.length / 2);
+    }
+    return highlightLines({ start: s, end: e, canvas, color: d.color });
+  };
+
   // Ao levantar a caneta: o traço pronto é desenhado direto na camada principal (sem redesenhar a página).
   const drawFinished = (it: Item) => {
     const canvas = isMarker(it) && markRef.current ? markRef.current : canvasRef.current;
@@ -436,6 +506,8 @@ export default function InkOverlay({
     }
     lassoRef.current = null;
     draftRef.current = null;
+    snapRef.current = null;
+    clearHold();
     pointerRef.current = null;
     clearLive();
     schedule();
@@ -498,6 +570,7 @@ export default function InkOverlay({
   }, [writing]);
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
+  useEffect(() => () => window.clearTimeout(holdTimerRef.current), []);
 
   const commit = (next: LayerItem[], base: LayerItem[]) => {
     undoRef.current.push(base);
@@ -563,7 +636,7 @@ export default function InkOverlay({
     }
     const ids = only ? new Set(only) : new Set(pendingRef.current);
     if (!only) pendingRef.current = new Set();
-    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && ids.has(it.id));
+    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !it.shape && ids.has(it.id));
     const w = sizeRef.current.w;
     if (!src.length) return;
     if (!w) {
@@ -653,7 +726,7 @@ export default function InkOverlay({
 
   // Conversão depois de escrever: tudo de uma vez (ou só o que está selecionado com o laço), no mesmo lugar.
   const convertNow = () => {
-    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen");
+    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !it.shape);
     const picked = selRef.current;
     const src = picked.size ? pens.filter((it) => picked.has(it.id)) : pens;
     if (!src.length) {
@@ -815,6 +888,19 @@ export default function InkOverlay({
             pr.push(Math.round((pr[pr.length - 1] * 0.6 + raw * 0.4) * 100) / 100);
           }
         }
+        // Formas: reinicia a contagem da pausa quando a caneta anda; tremidinha de poucos pixels não conta.
+        if (draftRef.current.tool === "pen" && shapesOnRef.current) {
+          const an = holdAnchorRef.current;
+          const moved = !an || Math.hypot(x - an.x, y - an.y) * size.w > (snapRef.current ? 6 : 4);
+          if (moved) {
+            if (snapRef.current) {
+              snapRef.current = null; // voltou a mexer: o traço continua livre
+              clearLive();
+            }
+            holdAnchorRef.current = { x, y };
+            armHold();
+          }
+        }
       }
     }
     // Escrevendo perto da borda da tela: a página rola junto.
@@ -884,6 +970,24 @@ export default function InkOverlay({
     }
     const d = draftRef.current;
     draftRef.current = null;
+    const snapped = snapRef.current;
+    snapRef.current = null;
+    clearHold();
+    if (d && snapped) {
+      commit([...itemsRef.current, snapped], itemsRef.current);
+      drawFinished(snapped);
+      clearLive();
+      return;
+    }
+    if (d && d.tool === "highlighter" && alignMarkRef.current) {
+      const bands = alignHighlight(d);
+      if (bands) {
+        commit([...itemsRef.current, ...bands], itemsRef.current);
+        bands.forEach(drawFinished);
+        clearLive();
+        return;
+      }
+    }
     if (d) {
       commit([...itemsRef.current, d], itemsRef.current);
       drawFinished(d);
@@ -938,6 +1042,8 @@ export default function InkOverlay({
     eraseBaseRef.current = null;
     // Descarta o traço incompleto.
     draftRef.current = null;
+    snapRef.current = null;
+    clearHold();
     lassoRef.current = null;
     if (e.pointerType === "pen") {
       penHoverRef.current = false;
@@ -1005,6 +1111,27 @@ export default function InkOverlay({
     schedule();
   };
 
+  // Endireita os traços selecionados que parecem uma forma (sem precisar segurar a caneta).
+  const straighten = () => {
+    const w = size.w;
+    if (!w) return;
+    const base = itemsRef.current;
+    let changed = false;
+    const next = base.map((it): LayerItem => {
+      if (!selRef.current.has(it.id) || it.kind !== "ink") return it;
+      const s = snapStroke(it, w);
+      if (!s) return it;
+      changed = true;
+      return s;
+    });
+    if (!changed) {
+      setAutoMsg("Não encontrei formas nos traços selecionados.");
+      return;
+    }
+    commit(next, base);
+    setSelection([]);
+  };
+
   const commitSmooth = () => {
     if (Math.abs(smoothRef.current - layer.smooth) > 0.001) pushNow();
   };
@@ -1020,7 +1147,7 @@ export default function InkOverlay({
     if (!size.w) return;
     const base = itemsRef.current;
     const picked = selRef.current;
-    const ink = base.filter(isInkLike);
+    const ink = base.filter(isInkLike).filter((it) => !(it.kind === "ink" && it.shape));
     const target = picked.size ? ink.filter((it) => picked.has(it.id)) : ink;
     const tidied = tidyItems(target, size.w, tidyAmt);
     const byId = new Map(tidied.map((it) => [it.id, it] as const));
@@ -1031,7 +1158,7 @@ export default function InkOverlay({
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
   const convert = async () => {
     if (convBusy) return;
-    const ink = itemsRef.current.filter(isInkLike);
+    const ink = itemsRef.current.filter(isInkLike).filter((it) => !(it.kind === "ink" && it.shape));
     const src = selRef.current.size ? ink.filter((it) => selRef.current.has(it.id)) : ink;
     setConvBusy(true);
     setConvErr(null);
@@ -1097,7 +1224,7 @@ export default function InkOverlay({
     scrollbarWidth: "none",
     flexWrap: "nowrap",
   };
-  const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
+  const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen" && !it.shape);
 
   if (!show) return null;
 
@@ -1375,6 +1502,7 @@ export default function InkOverlay({
           {tool === "lasso" && selIds.length > 0 && (
             <div role="toolbar" aria-label="Ações da seleção" style={row}>
               <button type="button" style={btn()} onClick={deleteSelection}>Excluir seleção</button>
+              <button type="button" style={btn()} onClick={straighten}>Endireitar formas</button>
               <button type="button" style={btn()} onClick={duplicateSelection}>Duplicar</button>
               <button type="button" style={btn()} onClick={recolorSelection}>Pintar com a cor atual</button>
               <button type="button" style={btn()} onClick={() => setSelection([])}>Soltar</button>
@@ -1397,6 +1525,16 @@ export default function InkOverlay({
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
             <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
             <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
+            <button
+              type="button"
+              aria-label="Formas automáticas: segure a caneta parada no fim do traço para endireitar"
+              title="Segure a caneta parada no fim do traço"
+              style={btn(shapesOn)}
+              onClick={() => setShapesOn((v) => !v)}
+            >
+              △ Formas
+            </button>
+            <button type="button" aria-label="Marca-texto alinhado às linhas de texto" style={btn(alignMark)} onClick={() => setAlignMark((v) => !v)}>≡ Alinhar</button>
             <button
               type="button"
               aria-label="Converter escrita em texto digitado"
