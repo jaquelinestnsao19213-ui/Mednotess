@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
-import { hitItem } from "../pdf/draw";
+import { hitItem, isMarker } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk } from "./ink-recognize";
@@ -54,7 +54,10 @@ export default function InkOverlay({
 }) {
   // Duas camadas de desenho: "canvasRef" guarda tudo o que já está pronto; "liveRef" recebe só o traço
   // que está sendo escrito (desenhado aos poucos, sem redesenhar a página inteira a cada movimento).
+  // O marca-texto fica numa camada à parte ("markRef"), atrás da escrita e misturada com o texto da página (multiply):
+  // a cor aparece por trás das letras, que continuam escuras e legíveis.
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const markRef = useRef<HTMLCanvasElement>(null);
   const liveRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [tool, setTool] = useState<Tool>("pen");
@@ -238,6 +241,16 @@ export default function InkOverlay({
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
+    const mark = markRef.current;
+    if (mark && (mark.width !== cw || mark.height !== ch)) {
+      mark.width = cw;
+      mark.height = ch;
+    }
+    const mctx = mark?.getContext("2d") ?? null;
+    if (mctx) {
+      mctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      mctx.clearRect(0, 0, w, h);
+    }
 
     // Transição da conversão: a escrita à mão some e o texto aparece, em poucos quadros.
     const fade = fadeRef.current;
@@ -262,7 +275,7 @@ export default function InkOverlay({
           drawText(ctx, it, w);
         }
       } else {
-        drawInkItem(ctx, smoothItemCached(it, smooth), w);
+        drawInkItem(isMarker(it) && mctx ? mctx : ctx, smoothItemCached(it, smooth), w);
       }
     }
     if (fadeRef.current && !fadeLoopRef.current) {
@@ -399,7 +412,7 @@ export default function InkOverlay({
 
   // Ao levantar a caneta: o traço pronto é desenhado direto na camada principal (sem redesenhar a página).
   const drawFinished = (it: Item) => {
-    const canvas = canvasRef.current;
+    const canvas = isMarker(it) && markRef.current ? markRef.current : canvasRef.current;
     const w = sizeRef.current.w;
     if (!canvas || !w) return;
     const ctx = canvas.getContext("2d");
@@ -1093,6 +1106,21 @@ export default function InkOverlay({
           cursor: active && writing ? "crosshair" : "default",
         }}
       />
+      {/* Camada do marca-texto: fica atrás da escrita e se mistura com o texto da página (o texto continua escuro por cima da cor). */}
+      <canvas
+        ref={markRef}
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width: "100%",
+          height: "100%",
+          zIndex: 4,
+          pointerEvents: "none",
+          mixBlendMode: "multiply",
+        }}
+      />
       {/* Camada só para o traço que está sendo escrito (o marca-texto fica translúcido aqui, sem escurecer onde se cruza). */}
       <canvas
         ref={liveRef}
@@ -1106,6 +1134,7 @@ export default function InkOverlay({
           zIndex: 6,
           pointerEvents: "none",
           opacity: tool === "highlighter" ? 0.4 : 1,
+          mixBlendMode: tool === "highlighter" ? "multiply" : "normal",
         }}
       />
       {active && (
