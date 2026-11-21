@@ -1,0 +1,138 @@
+.vh-statusrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.vh-statusrow p {
+  margin: 0;
+}
+
+.vh-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+/* Painel com fundo sólido e contraste forte */
+.vh-panel {
+  width: min(440px, 100%);
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 16px;
+  background: #ffffff;
+  color: #1a1a1a;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.vh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vh-primary {
+  width: 100%;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: #1a1a1a;
+  color: #ffffff;
+  font-weight: 600;
+  cursor: pointer;
+}
+.vh-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.vh-info {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff4d6;
+  color: #4a3500;
+  font-size: 0.9rem;
+}
+.vh-hint {
+  margin: 0;
+  color: #555555;
+  font-size: 0.9rem;
+}
+.vh-meta {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.vh-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vh-item {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  padding: 12px;
+  text-align: left;
+  border: 1px solid #d4d4d4;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #1a1a1a;
+  cursor: pointer;
+}
+.vh-item:hover {
+  border-color: #1a1a1a;
+}
+.vh-item-date {
+  font-weight: 600;
+}
+.vh-item-title {
+  color: #444444;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vh-tag {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: #ececec;
+  color: #1a1a1a;
+}
+.vh-tag-manual {
+  background: #d9ecff;
+}
+.vh-tag-restore {
+  background: #ffe3cf;
+}
+
+.vh-preview {
+  margin: 0;
+  padding: 12px;
+  max-height: 55vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  border: 1px solid #d4d4d4;
+  border-radius: 10px;
+  background: #fafafa;
+  color: #1a1a1a;
+}

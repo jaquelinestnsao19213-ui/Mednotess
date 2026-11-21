@@ -13,7 +13,9 @@ import PageAssistant from "@/components/PageAssistant";
 import SubpagesTable from "@/components/SubpagesTable";
 import PageMovePicker from "@/components/PageMovePicker";
 import SharePanel from "@/components/SharePanel";
+import VersionHistory from "@/components/VersionHistory";
 import { deletePages, deletionMessage, movePage, planDeletion } from "@/lib/page-ops";
+import { AUTO_INTERVAL_MS, contentHash, latestSnapshot, saveVersion, type PageVersion } from "@/lib/page-versions";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
@@ -37,10 +39,42 @@ function PageView({ id }: { id: string }) {
   const [editorVersion, setEditorVersion] = useState(0);
   const [reloadKey, setReloadKey] = useState(0);
   const [movingSelf, setMovingSelf] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const coverInput = useRef<HTMLInputElement>(null);
+  // Histórico de versões: última versão guardada (hash + horário) e a página atual em memória.
+  const lastSnap = useRef<{ hash: string; at: number } | null>(null);
+  const pageRef = useRef<SharedPageRow | null>(null);
+  pageRef.current = page;
+
+  // Guarda uma versão automática da página. Sem `force`, respeita o intervalo mínimo;
+  // nunca guarda duas versões iguais seguidas.
+  async function maybeSnapshot(force = false) {
+    const current = pageRef.current;
+    if (!current || !current.content) return;
+    const hash = contentHash(current.content, current.title);
+    const last = lastSnap.current;
+    if (last && last.hash === hash) return;
+    if (!force && last && Date.now() - last.at < AUTO_INTERVAL_MS) return;
+    lastSnap.current = { hash, at: Date.now() };
+    await saveVersion({ id, title: current.title, content: current.content }, "auto");
+  }
+
+  // Ao abrir a página, guarda o estado de partida (se ainda não estiver no histórico),
+  // para que a primeira edição nunca apague o que existia antes.
+  async function baseline(current: SharedPageRow) {
+    if (!current.content) return;
+    const hash = contentHash(current.content, current.title);
+    const last = await latestSnapshot(id);
+    if (last && last.hash === hash) {
+      lastSnap.current = last;
+      return;
+    }
+    lastSnap.current = { hash, at: Date.now() };
+    await saveVersion({ id, title: current.title, content: current.content }, "auto");
+  }
 
   async function flush() {
     const patch = pending.current;
@@ -49,6 +83,7 @@ function PageView({ id }: { id: string }) {
     const { error } = await supabase.from("pages").update(patch).eq("id", id);
     setError(error ? "Não foi possível salvar. Tente de novo." : null);
     setStatus("saved");
+    if (!error && "content" in patch) void maybeSnapshot();
   }
   const flushRef = useRef(flush);
   flushRef.current = flush;
@@ -63,6 +98,31 @@ function PageView({ id }: { id: string }) {
   function update(patch: Partial<PageRow>) {
     setPage((p) => (p ? { ...p, ...patch } : p));
     save(patch);
+  }
+
+  // Versão manual (botão "Salvar versão agora" do histórico).
+  async function saveManual(): Promise<boolean> {
+    const current = pageRef.current;
+    if (!current) return false;
+    const ok = await saveVersion({ id, title: current.title, content: current.content }, "manual");
+    if (ok) lastSnap.current = { hash: contentHash(current.content, current.title), at: Date.now() };
+    return ok;
+  }
+
+  // Restaura uma versão. Antes, guarda o conteúdo atual no histórico; se isso falhar, cancela.
+  async function restoreVersion(version: PageVersion) {
+    const current = pageRef.current;
+    if (!current) return;
+    const kept = await saveVersion({ id, title: current.title, content: current.content }, "restore");
+    if (!kept) return setError("Não foi possível guardar o conteúdo atual antes de restaurar. Nada foi alterado.");
+    const content = toDoc(version.content);
+    const title = version.title ?? current.title;
+    setPage((p) => (p ? { ...p, title, content } : p));
+    save({ title, content });
+    setEditorVersion((v) => v + 1);
+    lastSnap.current = { hash: contentHash(content, title), at: Date.now() };
+    setError(null);
+    setShowHistory(false);
   }
 
   // Converte o texto da assistente (títulos ##, listas, **negrito**) em blocos do editor.
@@ -114,7 +174,10 @@ function PageView({ id }: { id: string }) {
 
   useEffect(() => {
     const onHide = () => {
-      if (document.visibilityState === "hidden") flushRef.current();
+      if (document.visibilityState === "hidden") {
+        flushRef.current();
+        void maybeSnapshot(true);
+      }
     };
     document.addEventListener("visibilitychange", onHide);
     window.addEventListener("pagehide", onHide);
@@ -123,7 +186,9 @@ function PageView({ id }: { id: string }) {
       window.removeEventListener("pagehide", onHide);
       if (timer.current) clearTimeout(timer.current);
       flushRef.current();
+      void maybeSnapshot(true);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -132,6 +197,7 @@ function PageView({ id }: { id: string }) {
       if (!row) return setNotFound(true);
       const current = row as SharedPageRow;
       setPage(current);
+      void baseline(current);
 
       await loadChildren();
 
@@ -145,6 +211,7 @@ function PageView({ id }: { id: string }) {
       }
       setCrumbs(trail);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, reloadKey]);
 
   async function loadChildren() {
@@ -268,7 +335,10 @@ function PageView({ id }: { id: string }) {
     aria-label="Título da página"
   />
 </div>
-      <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
+      <div className="vh-statusrow">
+        <p className="muted small">{status === "saving" ? "Salvando…" : "Salvo"}</p>
+        <button className="secondary small-btn" onClick={() => setShowHistory(true)}>Histórico</button>
+      </div>
       <SharePanel
         pageId={page.id}
         pageTitle={page.title}
@@ -298,6 +368,14 @@ function PageView({ id }: { id: string }) {
         <button className="danger" onClick={remove}>Excluir página</button>
       </div>
       {movingSelf && <PageMovePicker mode="move" moving={{ id: page.id, title: page.title, icon: page.icon, type: page.type, parent_id: page.parent_id }} onClose={() => setMovingSelf(false)} onPick={(destination) => void moveSelf(destination)} />}
+      {showHistory && (
+        <VersionHistory
+          pageId={id}
+          onClose={() => setShowHistory(false)}
+          onRestore={restoreVersion}
+          onSaveManual={saveManual}
+        />
+      )}
     </>
   );
 }
