@@ -1,6 +1,7 @@
 "use client";
 
 import "@xyflow/react/dist/style.css";
+import "./detail-card.css";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Background, BackgroundVariant, ConnectionMode, Controls, MiniMap, ReactFlow, ReactFlowProvider, useReactFlow, type Connection, type EdgeChange, type FinalConnectionState, type NodeChange } from "@xyflow/react";
@@ -61,6 +62,9 @@ function Editor({ id }: { id: string }) {
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [toast, setToast] = useState<{ text: string; undo?: boolean } | null>(null);
   const [histVersion, setHistVersion] = useState(0);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+  const [cardEditing, setCardEditing] = useState(false);
+  const [cardMin, setCardMin] = useState(false);
   const [measured, setMeasured] = useState<Map<string, { width: number; height: number }>>(new Map());
 
   const docRef = useRef(doc);
@@ -570,6 +574,10 @@ function Editor({ id }: { id: string }) {
     startEdit: (nid: string) => setEditingId(nid),
   }), [commit, notify, removeEdges, addChildTo, addSiblingOf, toggleNode, removeNodes, select]);
 
+  /* ---------- cartão de anotação ---------- */
+  const cardNodeId = selNodes.length === 1 ? selNodes[0] : null;
+  useEffect(() => { setCardEditing(false); }, [cardNodeId]);
+
   /* ---------- derivados para a tela ---------- */
   const flowNodes = useMemo(() => toFlowNodes(doc, selNodeSet, editingId, { onToggle: toggleNode, onLabel: finishLabel }, measured), [doc, selNodeSet, editingId, toggleNode, finishLabel, measured]);
   const flowEdges = useMemo(() => toFlowEdges(doc, selEdgeSet), [doc, selEdgeSet]);
@@ -618,6 +626,8 @@ function Editor({ id }: { id: string }) {
           onInit={onInit}
           onNodeDragStart={onNodeDragStart}
           onNodeDragStop={onNodeDragStop}
+          onNodeMouseEnter={(_, n) => setHoverId(n.id)}
+          onNodeMouseLeave={() => setHoverId(null)}
           onNodeDoubleClick={(_, n) => { if (n.type !== "image") setEditingId(n.id); }}
           onEdgeDoubleClick={(_, e) => { select([], [e.id]); setPanel("props"); }}
           onMoveEnd={(_, vp) => { const box = stageRef.current?.getBoundingClientRect(); viewportRef.current = { ...vp, ...(box ? { w: Math.round(box.width), h: Math.round(box.height) } : {}) }; if (phase === "ready" && !skipSave.current) saver.schedule(snapshot()); }}
@@ -647,6 +657,57 @@ function Editor({ id }: { id: string }) {
             <p>Toque em “＋ Conceito” para começar, ou peça ao Assistente IA para montar a partir das suas anotações.</p>
           </div>
         )}
+
+        {panel === "none" && !editingId && (() => {
+          const picked = only && only.kind !== "image" ? only : undefined;
+          const peek = !picked && hoverId ? nodeById(doc, hoverId) : undefined;
+          const shown = picked ?? (peek && peek.kind !== "image" && peek.data.detail?.trim() ? peek : undefined);
+          if (!shown) return null;
+          const interactive = !!picked;
+          const accent = paletteStyle(shown.data.color).border;
+          const detail = shown.data.detail ?? "";
+          return (
+            <section
+              key={shown.id}
+              className={`mm-card${interactive ? "" : " mm-card-peek"}${cardMin && interactive ? " mm-card-min" : ""}`}
+              style={{ "--mm-accent": accent } as React.CSSProperties}
+              aria-label="Anotação do item"
+            >
+              <header className="mm-card-head">
+                <h2 className="mm-card-title">{shown.data.label || (shown.kind === "note" ? "Caixa de texto" : "Sem título")}</h2>
+                {interactive && (
+                  <div className="mm-card-tools">
+                    <button type="button" aria-label={cardMin ? "Mostrar anotação" : "Recolher anotação"} onClick={() => setCardMin((v) => !v)}>{cardMin ? "▾" : "▴"}</button>
+                    <button type="button" aria-label="Fechar anotação" onClick={() => select([])}>×</button>
+                  </div>
+                )}
+              </header>
+              {!(cardMin && interactive) && (
+                cardEditing && interactive ? (
+                  <textarea
+                    className="mm-card-edit"
+                    autoFocus
+                    value={detail}
+                    placeholder="Escreva a anotação deste item…"
+                    onChange={(e) => actions.patchNodes([shown.id], { detail: e.target.value }, `detail-${shown.id}`)}
+                    onBlur={() => actions.endCoalesce()}
+                    onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setCardEditing(false); } }}
+                  />
+                ) : detail.trim() ? (
+                  <p className="mm-card-body">{detail}</p>
+                ) : (
+                  <p className="mm-card-empty">Ainda sem anotação.</p>
+                )
+              )}
+              {interactive && !(cardMin) && (
+                <footer className="mm-card-foot">
+                  <button type="button" className="mm-card-primary" onClick={() => setCardEditing((v) => !v)}>{cardEditing ? "Concluir" : detail.trim() ? "Editar anotação" : "Adicionar anotação"}</button>
+                  <button type="button" onClick={() => setPanel("props")}>Mais opções</button>
+                </footer>
+              )}
+            </section>
+          );
+        })()}
 
         {only && !editingId && panel === "none" && (
           <div className="mm-quick" role="toolbar" aria-label="Ações do item selecionado">
@@ -699,4 +760,3 @@ function Editor({ id }: { id: string }) {
     </div>
   );
 }
-
