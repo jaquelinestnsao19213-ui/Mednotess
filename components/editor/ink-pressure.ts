@@ -64,8 +64,19 @@ export function drawInkItem(ctx: CanvasRenderingContext2D, it: Item, W: number) 
 }
 
 // Aumenta ou diminui um item em volta do ponto (cx, cy). Traços e círculos engrossam junto; textos mudam de tamanho.
+// Um texto convertido leva o manuscrito guardado junto (traços e âncora), para que continue combinando com o texto.
 export function scaleLayerItem(it: LayerItem, s: number, cx: number, cy: number): LayerItem {
-  if (it.kind === "text") return { ...it, x: cx + (it.x - cx) * s, y: cy + (it.y - cy) * s, size: it.size * s };
+  if (it.kind === "text") {
+    const scaled = { ...it, x: cx + (it.x - cx) * s, y: cy + (it.y - cy) * s, size: it.size * s };
+    if (it.src) {
+      scaled.src = {
+        items: it.src.items.map((g) => scaleLayerItem(g, s, cx, cy) as InkItem),
+        ox: cx + (it.src.ox - cx) * s,
+        oy: cy + (it.src.oy - cy) * s,
+      };
+    }
+    return scaled;
+  }
   if (it.kind === "ink") {
     const pts = it.pts.slice();
     for (let i = 0; i + 1 < pts.length; i += 2) {
