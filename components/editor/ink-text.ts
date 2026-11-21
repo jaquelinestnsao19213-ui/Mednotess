@@ -1,9 +1,27 @@
 import { boundsOf } from "./ink-geometry";
-import { uid, type Item } from "../pdf/types";
+import { uid, type InkItem, type Item } from "../pdf/types";
 
 // Texto digitado que substitui a escrita à mão (conversão automática), guardado na própria camada de escrita.
 // x e y: início e centro vertical da linha; size: altura da letra. Tudo dividido pela LARGURA da página.
-export type TextItem = { id: string; kind: "text"; x: number; y: number; text: string; size: number; font: string | null; color: string };
+//
+// O manuscrito nunca se perde: os traços originais da linha ficam guardados dentro do texto, em "src".
+// "ox" e "oy" são a âncora (x e y do texto) no momento da conversão: a diferença entre a posição atual do texto
+// e a âncora diz o quanto o manuscrito precisa andar quando for restaurado ou mostrado por trás do texto.
+// "alts" são outras leituras sugeridas pelo reconhecedor; "edited" marca texto corrigido por você.
+export type InkSource = { items: InkItem[]; ox: number; oy: number };
+export type TextItem = {
+  id: string;
+  kind: "text";
+  x: number;
+  y: number;
+  text: string;
+  size: number;
+  font: string | null;
+  color: string;
+  src?: InkSource;
+  alts?: string[];
+  edited?: boolean;
+};
 export type LayerItem = Item | TextItem;
 
 export const SANS = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
@@ -79,13 +97,43 @@ export function unionBox(items: LayerItem[], sel: Set<string>, w: number): numbe
 }
 
 // Cria o texto digitado a partir de uma linha reconhecida (mesma posição, altura e cor da escrita).
-export function textFromLine(l: { text: string; left: number; top: number; bottom: number; color: string }, w: number, font: string | null): TextItem {
+// Os traços originais da linha (l.items) ficam guardados no texto, então dá para ver ou restaurar o manuscrito depois.
+export function textFromLine(
+  l: { text: string; left: number; top: number; bottom: number; color: string; items?: InkItem[]; alts?: string[] },
+  w: number,
+  font: string | null
+): TextItem {
   const h = Math.max(1, l.bottom - l.top);
   let px = Math.max(16, Math.min(56, h * 0.95));
   const width = textWidth(l.text, px, font);
   const room = w * 0.97 - l.left;
   if (width > room && width > 0 && room > 20) px = Math.max(10, (px * room) / width);
-  return { id: uid(), kind: "text", x: l.left / w, y: (l.top + l.bottom) / 2 / w, text: l.text, size: px / w, font, color: l.color };
+  const x = l.left / w;
+  const y = (l.top + l.bottom) / 2 / w;
+  const t: TextItem = { id: uid(), kind: "text", x, y, text: l.text, size: px / w, font, color: l.color };
+  if (l.items && l.items.length) t.src = { items: l.items, ox: x, oy: y };
+  if (l.alts && l.alts.length) t.alts = l.alts;
+  return t;
+}
+
+// Deslocamento (normalizado) do manuscrito guardado em relação a onde o texto está agora.
+export function srcOffset(t: TextItem): { dx: number; dy: number } {
+  if (!t.src) return { dx: 0, dy: 0 };
+  return { dx: t.x - t.src.ox, dy: t.y - t.src.oy };
+}
+
+// Traços originais do texto, já na posição atual do texto e com ids novos (para voltar ao manuscrito sem repetir ids).
+export function restoreStrokes(t: TextItem): InkItem[] {
+  if (!t.src) return [];
+  const { dx, dy } = srcOffset(t);
+  return t.src.items.map((s) => {
+    const pts = s.pts.slice();
+    for (let i = 0; i + 1 < pts.length; i += 2) {
+      pts[i] += dx;
+      pts[i + 1] += dy;
+    }
+    return { ...s, id: uid(), pts };
+  });
 }
 
 // Fontes de letra manuscrita (Google Fonts). Se não carregarem, o navegador usa a fonte de reserva da lista.
