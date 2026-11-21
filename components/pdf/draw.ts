@@ -22,7 +22,8 @@ function strokeInk(ctx: CanvasRenderingContext2D, pts: number[], W: number, H: n
 
 export function drawItem(ctx: CanvasRenderingContext2D, it: Item, W: number, H: number) {
   ctx.save();
-  ctx.lineCap = "round";
+  // faixa de marca-texto alinhada ao texto: pontas retas, para não passar das letras
+  ctx.lineCap = it.kind === "ink" && it.shape && it.tool === "highlighter" ? "butt" : "round";
   ctx.lineJoin = "round";
   ctx.strokeStyle = it.color;
   ctx.lineWidth = Math.max(1, it.width * W);
