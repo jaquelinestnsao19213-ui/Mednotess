@@ -45,7 +45,47 @@ const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvam
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
-const BAR_IDLE_MS = 6000; // modo automático: a barra de ferramentas some depois desse tempo sem a caneta
+const BAR_IDLE_MS = 10000; // modo automático: a barra de ferramentas some depois desse tempo sem a caneta
+const TAP_MS = 250; // toque rápido da caneta (sem arrastar) conta como "toque", não como traço
+const TAP_MOVE_PX = 6; // quanto a caneta pode se mexer e ainda ser um toque
+const DOUBLE_TAP_MS = 400; // dois toques da caneta nesse intervalo e perto um do outro = colocar o cursor ali
+const DOUBLE_TAP_PX = 30;
+
+// Coloca o cursor do texto no ponto da tela (x, y). A camada de escrita fica por cima da página,
+// então ela é "desligada" por um instante para o navegador achar o texto que está por baixo.
+function placeCaretAt(canvas: HTMLCanvasElement | null, x: number, y: number) {
+  const prev = canvas?.style.pointerEvents ?? "";
+  if (canvas) canvas.style.pointerEvents = "none";
+  try {
+    const doc = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    };
+    let range: Range | null = null;
+    if (doc.caretRangeFromPoint) {
+      range = doc.caretRangeFromPoint(x, y);
+    } else if (doc.caretPositionFromPoint) {
+      const p = doc.caretPositionFromPoint(x, y);
+      if (p) {
+        range = document.createRange();
+        range.setStart(p.offsetNode, p.offset);
+        range.collapse(true);
+      }
+    }
+    if (!range) return;
+    const node = range.startContainer;
+    const el = (node.nodeType === 1 ? (node as Element) : node.parentElement)?.closest<HTMLElement>('[contenteditable="true"]');
+    if (!el) return;
+    el.focus();
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  } catch {
+    // navegador sem suporte: o dedo continua servindo para tocar no texto
+  } finally {
+    if (canvas) canvas.style.pointerEvents = prev;
+  }
+}
 
 export default function InkOverlay({
   layer,
@@ -91,6 +131,9 @@ export default function InkOverlay({
   const penNearTimerRef = useRef(0);
   const barTimerRef = useRef(0);
   const lastReflowRef = useRef(0);
+  // Toque da caneta: começo do gesto atual e o último toque (para o toque duplo que coloca o cursor no texto).
+  const tapRef = useRef<{ t: number; x: number; y: number } | null>(null);
+  const lastTapRef = useRef<{ id: string; t: number; x: number; y: number } | null>(null);
 
   // Converter escrita em texto digitado
   const [convOpen, setConvOpen] = useState(false);
@@ -503,6 +546,8 @@ export default function InkOverlay({
       pinchRef.current = null;
       panRef.current = null;
       penHoverRef.current = false;
+      tapRef.current = null;
+      lastTapRef.current = null;
       clearLive();
       setConvOpen(false);
       setConvText(null);
@@ -818,7 +863,12 @@ export default function InkOverlay({
     autoTimerRef.current = 0;
     const [x, y] = toPoint(e.clientX, e.clientY);
 
-    if (tool === "lasso") {
+    // S Pen: com o botão da caneta (ou a ponta de borracha) apertado, ela apaga naquele gesto, sem trocar de ferramenta.
+    const eff: Tool = e.pointerType === "pen" && (e.buttons & 34) !== 0 ? "eraser" : tool;
+    // Começo de um possível "toque" da caneta (toque rápido, sem arrastar).
+    tapRef.current = e.pointerType === "pen" && eff === "pen" ? { t: performance.now(), x: e.clientX, y: e.clientY } : null;
+
+    if (eff === "lasso") {
       const box = unionBox(itemsRef.current, selRef.current, size.w);
       const slack = e.pointerType === "touch" ? 0.06 : 0.015; // com o dedo, a área de pegar a seleção é maior
       if (box && x >= box[0] - slack && x <= box[2] + slack && y >= box[1] - slack && y <= box[3] + slack) {
@@ -830,13 +880,13 @@ export default function InkOverlay({
       schedule();
       return;
     }
-    if (tool === "eraser") {
+    if (eff === "eraser") {
       erasingRef.current = true;
       eraseBaseRef.current = itemsRef.current;
       eraseAt(x, y);
       return;
     }
-    const marker = tool === "highlighter";
+    const marker = eff === "highlighter";
     clearLive();
     // Só a caneta (S Pen) guarda a pressão; dedo, mouse e marca-texto continuam com espessura constante.
     const pr0 = !marker && e.pointerType === "pen" ? [Math.round((e.pressure > 0 ? e.pressure : 0.5) * 100) / 100] : null;
@@ -986,9 +1036,32 @@ export default function InkOverlay({
     const d = draftRef.current;
     draftRef.current = null;
     if (d) {
+      // Toque rápido da caneta, sem arrastar: sozinho é só um ponto (como um ponto final);
+      // dois toques seguidos, perto um do outro, colocam o cursor do texto ali (o ponto do primeiro toque some).
+      const now = performance.now();
+      const tap = tapRef.current;
+      tapRef.current = null;
+      const isTap =
+        auto && !!tap && d.tool === "pen" && now - tap.t < TAP_MS && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < TAP_MOVE_PX;
+      const prev = lastTapRef.current;
+      if (isTap && prev && now - prev.t < DOUBLE_TAP_MS && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < DOUBLE_TAP_PX) {
+        lastTapRef.current = null;
+        if (itemsRef.current.some((it) => it.id === prev.id)) {
+          itemsRef.current = itemsRef.current.filter((it) => it.id !== prev.id);
+          undoRef.current.pop(); // o ponto do primeiro toque sai também do histórico
+          pendingRef.current.delete(prev.id);
+          queuePush();
+        }
+        clearLive();
+        schedule();
+        setTick((t) => t + 1);
+        placeCaretAt(canvasRef.current, e.clientX, e.clientY);
+        return;
+      }
       commit([...itemsRef.current, d], itemsRef.current);
       drawFinished(d);
       clearLive();
+      lastTapRef.current = isTap ? { id: d.id, t: now, x: e.clientX, y: e.clientY } : null;
       if (autoOnRef.current && d.tool === "pen") {
         // Se este traço começou outra linha, a linha anterior já está pronta e é convertida agora.
         // Se continua na mesma linha, espera a pausa para não converter no meio da escrita.
@@ -1040,6 +1113,7 @@ export default function InkOverlay({
     // Descarta o traço incompleto.
     draftRef.current = null;
     lassoRef.current = null;
+    tapRef.current = null;
     if (e.pointerType === "pen") {
       penHoverRef.current = false;
     }
@@ -1532,7 +1606,7 @@ export default function InkOverlay({
                 type="button"
                 aria-label={
                   auto
-                    ? "Caneta automática ligada: a caneta escreve direto; dedo e teclado digitam. Toque para desligar"
+                    ? "Caneta automática ligada: a caneta escreve direto; dedo e teclado digitam; dois toques da caneta colocam o cursor; o botão da caneta apaga. Toque para desligar"
                     : "Ligar a caneta automática: a caneta escreve direto; dedo e teclado digitam"
                 }
                 style={btn(auto)}
