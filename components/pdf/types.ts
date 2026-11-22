@@ -1,7 +1,8 @@
 // Modelo das anotações. Tudo é guardado em coordenadas NORMALIZADAS (0 a 1)
 // em relação à página, então o desenho acompanha qualquer zoom ou tamanho de tela.
+import type { TextItem } from "../editor/ink-text";
 
-export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "note" | "select" | "clip";
+export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "lasso" | "note" | "select" | "clip";
 
 export type InkItem = {
   id: string;
@@ -10,6 +11,8 @@ export type InkItem = {
   color: string;
   width: number; // fração da largura da página
   pts: number[]; // [x0, y0, x1, y1, ...] normalizados
+  keep?: boolean; // "Manter como desenho": nunca vira texto
+  force?: boolean; // "Converter como texto": nunca é tratado como desenho
 };
 
 export type EllipseItem = {
@@ -26,13 +29,14 @@ export type EllipseItem = {
 export type Item = InkItem | EllipseItem;
 
 // text = texto simples (busca e comentário vazio); html = texto formatado; w/h = tamanho da caixa (px); fs = tamanho da letra (px)
-// ro = comentário da dona do caderno visto por um visitante de link publicado (só leitura; nunca é salvo)
+// ro = comentário da dona do caderno (link publicado) visto por um visitante (só leitura; nunca é salvo)
 export type Note = { id: string; x: number; y: number; text: string; color: string; html?: string; w?: number; h?: number; fs?: number; ro?: boolean };
 
 // Comentário copiado (para colar em outro lugar do PDF)
 export type NoteClip = Pick<Note, "text" | "html" | "color" | "w" | "h" | "fs">;
 
-export type PageAnn = { items: Item[]; notes: Note[] };
+// texts = escrita à mão convertida em fonte. Mesmo formato do caderno: x, y e size divididos pela LARGURA da página.
+export type PageAnn = { items: Item[]; notes: Note[]; texts?: TextItem[] };
 
 export const EMPTY: PageAnn = { items: [], notes: [] };
 
@@ -47,6 +51,7 @@ export function normalizeAnn(data: unknown): PageAnn {
   return {
     items: Array.isArray(d.items) ? (d.items as Item[]) : [],
     notes: Array.isArray(d.notes) ? (d.notes as Note[]) : [],
+    texts: Array.isArray(d.texts) ? (d.texts as TextItem[]) : [],
   };
 }
 
@@ -71,6 +76,30 @@ export const opRemoveItems = (page: number, items: Item[]): Op => {
     page,
     redo: (a) => ({ ...a, items: a.items.filter((i) => !ids.has(i.id)) }),
     undo: (a) => ({ ...a, items: [...a.items, ...items] }),
+  };
+};
+
+// Troca traços e textos de uma vez (conversão da escrita, correção de palavras, "manter como desenho", borracha).
+export const opTextChange = (
+  page: number,
+  c: { rmItems: Item[]; addItems: Item[]; rmTexts: TextItem[]; addTexts: TextItem[] }
+): Op => {
+  const rmI = new Set(c.rmItems.map((i) => i.id));
+  const addI = new Set(c.addItems.map((i) => i.id));
+  const rmT = new Set(c.rmTexts.map((t) => t.id));
+  const addT = new Set(c.addTexts.map((t) => t.id));
+  return {
+    page,
+    redo: (a) => ({
+      ...a,
+      items: [...a.items.filter((i) => !rmI.has(i.id)), ...c.addItems],
+      texts: [...(a.texts ?? []).filter((t) => !rmT.has(t.id)), ...c.addTexts],
+    }),
+    undo: (a) => ({
+      ...a,
+      items: [...a.items.filter((i) => !addI.has(i.id)), ...c.rmItems],
+      texts: [...(a.texts ?? []).filter((t) => !addT.has(t.id)), ...c.rmTexts],
+    }),
   };
 };
 
@@ -105,6 +134,7 @@ export const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "highlighter", label: "Marca-texto", glyph: "▮" },
   { id: "circle", label: "Círculo", glyph: "◯" },
   { id: "eraser", label: "Borracha", glyph: "⌫" },
+  { id: "lasso", label: "Laço", glyph: "⬚" },
   { id: "note", label: "Comentário", glyph: "💬" },
   { id: "select", label: "Selecionar texto", glyph: "T" },
   { id: "clip", label: "Copiar imagem", glyph: "✂" },
