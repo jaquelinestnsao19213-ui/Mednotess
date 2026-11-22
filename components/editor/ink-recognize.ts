@@ -4,6 +4,8 @@ import type { InkItem, Item } from "../pdf/types";
 // Os traços são agrupados em linhas pela posição vertical e enviados a /api/handwriting.
 // Setas, traços soltos (travessão de lista, sublinhado), linhas longas e círculos grandes NÃO são letras:
 // ficam de fora da conversão e continuam como desenho (ver shapeIds).
+// Você também decide: traço marcado com "keep" (Manter como desenho) nunca vira texto,
+// e traço marcado com "force" (Converter como texto) nunca é tratado como desenho.
 
 export type Recognized = { text: string; ids: string[]; left: number; top: number; right: number; bottom: number; color: string };
 
@@ -210,11 +212,19 @@ function isBigLoop(g: Geo, ref: number): boolean {
 
 // Ids dos traços de caneta que são desenho (seta, travessão solto, linha longa, círculo grande) e não letras.
 // Esses traços não são enviados ao reconhecedor e ficam na página como foram escritos.
+// "keep" (Manter como desenho) sempre é desenho; "force" (Converter como texto) nunca é desenho.
 export function shapeIds(items: Item[], w: number, anchors: Anchor[] = []): Set<string> {
   const out = new Set<string>();
+  const forced = new Set<string>();
   const geos: Geo[] = [];
   for (const it of items) {
     if (it.kind !== "ink" || it.tool !== "pen") continue;
+    const flags = it as InkItem & { keep?: boolean; force?: boolean };
+    if (flags.keep) {
+      out.add(it.id);
+      continue;
+    }
+    if (flags.force) forced.add(it.id);
     const g = geoOf(it, w);
     if (g) geos.push(g);
   }
@@ -241,6 +251,7 @@ export function shapeIds(items: Item[], w: number, anchors: Anchor[] = []): Set<
     }
     if (isBigLoop(g, ref)) out.add(g.item.id);
   }
+  forced.forEach((id) => out.delete(id));
   return out;
 }
 
