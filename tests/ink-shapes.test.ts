@@ -46,3 +46,18 @@ test("snapStroke ignora marca-texto", () => {
   const it = { id: "a", kind: "ink" as const, tool: "highlighter" as const, color: "#fa0", width: 0.02, pts: norm(seg([0, 0], [300, 0])) };
   assert.equal(snapStroke(it, W), null);
 });
+
+test("círculo com duas voltas desencontradas", () => {
+  const c = Array.from({ length: 140 }, (_, i): [number, number] => {
+    const a = (i / 70) * 2 * Math.PI;
+    const r = 100 + (i < 70 ? 0 : 9 * Math.sin(a * 2)) + (i > 70 ? 8 : 0);
+    return [300 + r * Math.cos(a), 300 + (r - 6) * Math.sin(a)];
+  });
+  const s = recognizeShape(norm(jit(c)), W);
+  assert.equal(s?.kind, "ellipse");
+});
+
+test("retângulo não vira elipse", () => {
+  const p = [...seg([100, 100], [500, 100], 40), ...seg([500, 100], [500, 300], 30), ...seg([500, 300], [100, 300], 40), ...seg([100, 300], [100, 100], 30)];
+  assert.equal(recognizeShape(norm(jit(p)), W)?.kind, "poly");
+});
