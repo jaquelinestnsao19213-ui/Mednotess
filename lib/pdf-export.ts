@@ -1,7 +1,8 @@
-// Gera uma CÓPIA do PDF com as anotações gravadas dentro: traços à mão livre, marca-texto, círculos
-// e comentários. O PDF original e o que está salvo no banco não são alterados.
+// Gera uma CÓPIA do PDF com as anotações gravadas dentro: traços à mão livre, marca-texto, círculos,
+// textos convertidos da escrita à mão e comentários. O PDF original e o que está salvo no banco não são alterados.
 //
 // - Traços, marca-texto e círculos viram desenho vetorial por cima da página (o texto do PDF continua selecionável).
+// - Textos convertidos são gravados em Helvetica (as fontes manuscritas da tela não vão dentro do PDF).
 // - Cada comentário vira um emblema numerado na posição dele; o texto completo (com título, negrito, listas e imagens)
 //   vai em páginas "Comentários" no final, com o mesmo número.
 import type { PageAnn, Note } from "@/components/pdf/types";
@@ -109,7 +110,7 @@ export async function buildAnnotatedPdf(
   opts: ExportOptions = {}
 ): Promise<Uint8Array> {
   const progress = opts.onProgress ?? (() => {});
-  const { PDFDocument, StandardFonts, rgb, BlendMode, LineCapStyle } = await import("pdf-lib");
+  const { PDFDocument, StandardFonts, rgb, BlendMode, LineCapStyle, degrees } = await import("pdf-lib");
 
   progress(0, 1, "Baixando o PDF…");
   let bytes: Uint8Array;
@@ -150,12 +151,12 @@ export async function buildAnnotatedPdf(
     const pageNo = i + 1;
     progress(i, total, `Gravando anotações (${pageNo}/${total})…`);
     const ann = pages[pageNo];
-    if (!ann || (ann.items.length === 0 && ann.notes.length === 0)) continue;
+    if (!ann || (ann.items.length === 0 && ann.notes.length === 0 && (ann.texts ?? []).length === 0)) continue;
     const page = all[i];
     const cb = page.getCropBox();
     const box: Box = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
     const rot = normRot(page.getRotation().angle);
-    const { W } = viewSize(box, rot);
+    const { W, H } = viewSize(box, rot);
 
     // Marca-texto primeiro (atrás), com mistura "multiply" como na tela; depois o resto.
     const ordered = [...ann.items].sort((a, b) => Number(b.kind === "ink" && b.tool === "highlighter") - Number(a.kind === "ink" && a.tool === "highlighter"));
@@ -190,6 +191,18 @@ export async function buildAnnotatedPdf(
           borderLineCap: LineCapStyle.Round,
         });
       }
+    }
+
+    // Textos convertidos da escrita à mão (x, y e tamanho divididos pela largura da página; y é o centro da linha).
+    for (const t of ann.texts ?? []) {
+      const txt = clean(t.text);
+      if (!txt.trim()) continue;
+      const [tr, tg, tb] = hexToRgb01(t.color);
+      const size = Math.max(4, t.size * W);
+      const [x, y] = toUser(t.x, (t.y * W) / H, box, rot);
+      const off = size * 0.3; // do centro da linha até a linha de base, para baixo na vista
+      const o: [number, number] = rot === 0 ? [0, -off] : rot === 90 ? [off, 0] : rot === 180 ? [0, off] : [-off, 0];
+      page.drawText(txt, { x: x + o[0], y: y + o[1], size, font: helv, color: rgb(tr, tg, tb), rotate: degrees(rot) });
     }
 
     // Emblemas numerados dos comentários
