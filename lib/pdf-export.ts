@@ -1,10 +1,11 @@
-// Gera uma CÓPIA do PDF com as anotações gravadas dentro: traços à mão livre, marca-texto, círculos
-// e comentários. O PDF original e o que está salvo no banco não são alterados.
+// Gera uma CÓPIA do PDF com as anotações gravadas dentro: traços à mão livre, marca-texto, círculos,
+// textos convertidos da escrita à mão e comentários. O PDF original e o que está salvo no banco não são alterados.
 //
 // - Traços, marca-texto e círculos viram desenho vetorial por cima da página (o texto do PDF continua selecionável).
 // - Cada comentário vira um emblema numerado na posição dele; o texto completo (com título, negrito, listas e imagens)
 //   vai em páginas "Comentários" no final, com o mesmo número.
 import type { PageAnn, Note } from "@/components/pdf/types";
+import { SANS, textWidth } from "../components/editor/ink-text";
 import { ellipsePath, hexToRgb01, inkPath, normRot, toUser, viewSize, type Box } from "./pdf-export-geom";
 
 export type ExportProgress = (done: number, total: number, label: string) => void;
@@ -109,7 +110,7 @@ export async function buildAnnotatedPdf(
   opts: ExportOptions = {}
 ): Promise<Uint8Array> {
   const progress = opts.onProgress ?? (() => {});
-  const { PDFDocument, StandardFonts, rgb, BlendMode, LineCapStyle } = await import("pdf-lib");
+  const { PDFDocument, StandardFonts, rgb, BlendMode, LineCapStyle, degrees } = await import("pdf-lib");
 
   progress(0, 1, "Baixando o PDF…");
   let bytes: Uint8Array;
@@ -150,12 +151,12 @@ export async function buildAnnotatedPdf(
     const pageNo = i + 1;
     progress(i, total, `Gravando anotações (${pageNo}/${total})…`);
     const ann = pages[pageNo];
-    if (!ann || (ann.items.length === 0 && ann.notes.length === 0)) continue;
+    if (!ann || (ann.items.length === 0 && ann.notes.length === 0 && !ann.texts?.length)) continue;
     const page = all[i];
     const cb = page.getCropBox();
     const box: Box = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
     const rot = normRot(page.getRotation().angle);
-    const { W } = viewSize(box, rot);
+    const { W, H } = viewSize(box, rot);
 
     // Marca-texto primeiro (atrás), com mistura "multiply" como na tela; depois o resto.
     const ordered = [...ann.items].sort((a, b) => Number(b.kind === "ink" && b.tool === "highlighter") - Number(a.kind === "ink" && a.tool === "highlighter"));
@@ -189,6 +190,41 @@ export async function buildAnnotatedPdf(
           borderWidth: width,
           borderLineCap: LineCapStyle.Round,
         });
+      }
+    }
+
+    // Textos convertidos da escrita à mão: no navegador viram imagem com a MESMA fonte da tela; sem navegador, Helvetica.
+    for (const t of ann.texts ?? []) {
+      const px = Math.max(1, t.size * W);
+      const hView = Math.ceil(px * 1.4);
+      let drawn = false;
+      if (typeof document !== "undefined") {
+        try {
+          const S = 3;
+          const wpx = Math.ceil(textWidth(t.text, px, t.font)) + 4;
+          const c = document.createElement("canvas");
+          c.width = wpx * S;
+          c.height = hView * S;
+          const cx = c.getContext("2d");
+          if (cx) {
+            cx.scale(S, S);
+            cx.fillStyle = t.color;
+            cx.font = `${px}px ${t.font ?? SANS}`;
+            cx.textBaseline = "middle";
+            cx.fillText(t.text, 0, hView / 2);
+            const img = await pdf.embedPng(c.toDataURL("image/png"));
+            const [ox, oy] = toUser(t.x, t.y + hView / 2 / H, box, rot);
+            page.drawImage(img, { x: ox, y: oy, width: wpx, height: hView, rotate: degrees(rot) });
+            drawn = true;
+          }
+        } catch {
+          drawn = false;
+        }
+      }
+      if (!drawn) {
+        const [tr, tg, tb] = hexToRgb01(t.color);
+        const [ox, oy] = toUser(t.x, t.y + (px * 0.3) / H, box, rot);
+        page.drawText(clean(t.text), { x: ox, y: oy, size: px * 0.9, font: helv, color: rgb(tr, tg, tb), rotate: degrees(rot) });
       }
     }
 
