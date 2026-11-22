@@ -20,15 +20,16 @@ export function smoothPoints(pts: number[], strength: number): number[] {
   return cur;
 }
 
+// Formas corrigidas automaticamente (it.shape) já são perfeitas: não são suavizadas, para os cantos continuarem retos.
 export function smoothItem(it: Item, strength: number): Item {
-  if (it.kind !== "ink" || strength <= 0) return it;
+  if (it.kind !== "ink" || strength <= 0 || it.shape) return it;
   return { ...it, pts: smoothPoints(it.pts, strength) };
 }
 
 // Versão com cache para traços já concluídos (não usar no traço que ainda está sendo escrito).
 const cache = new WeakMap<Item, { s: number; out: Item }>();
 export function smoothItemCached(it: Item, strength: number): Item {
-  if (it.kind !== "ink" || strength <= 0) return it;
+  if (it.kind !== "ink" || strength <= 0 || it.shape) return it;
   const hit = cache.get(it);
   if (hit && hit.s === strength) return hit.out;
   const out = smoothItem(it, strength);

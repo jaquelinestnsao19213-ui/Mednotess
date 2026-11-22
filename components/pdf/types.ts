@@ -10,6 +10,7 @@ export type InkItem = {
   color: string;
   width: number; // fração da largura da página
   pts: number[]; // [x0, y0, x1, y1, ...] normalizados
+  shape?: boolean; // forma corrigida automaticamente (reta, seta, retângulo): não é suavizada nem convertida em texto
 };
 
 export type EllipseItem = {
