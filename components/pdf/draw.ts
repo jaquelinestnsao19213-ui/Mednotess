@@ -1,4 +1,5 @@
-import type { Item } from "./types";
+import { SANS, textWidth } from "../editor/ink-text";
+import type { Item, PdfText } from "./types";
 
 function strokeInk(ctx: CanvasRenderingContext2D, pts: number[], W: number, H: number) {
   const n = pts.length / 2;
@@ -74,4 +75,32 @@ export function hitItem(it: Item, x: number, y: number, W: number, H: number, ra
   const ry = Math.max(1, it.ry * H);
   const k = Math.hypot((px - it.cx * W) / rx, (py - it.cy * H) / ry);
   return Math.abs(k - 1) * Math.min(rx, ry) <= reach;
+}
+
+// Textos convertidos (escrita à mão virou fonte).
+export function drawTexts(ctx: CanvasRenderingContext2D, texts: PdfText[], W: number, H: number) {
+  for (const t of texts) {
+    ctx.save();
+    ctx.fillStyle = t.color;
+    ctx.font = `${Math.max(1, Math.round(t.size * W * 10) / 10)}px ${t.font ?? SANS}`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillText(t.text, t.x * W, t.y * H);
+    ctx.restore();
+  }
+}
+
+// Caixa do texto em pixels da página: [esquerda, topo, direita, base].
+export function textBox(t: PdfText, W: number, H: number): [number, number, number, number] {
+  const px = Math.max(1, t.size * W);
+  const w = textWidth(t.text, px, t.font);
+  const half = (px * 1.2) / 2;
+  return [t.x * W, t.y * H - half, t.x * W + w, t.y * H + half];
+}
+
+export function hitPdfText(t: PdfText, x: number, y: number, W: number, H: number, radiusPx: number): boolean {
+  const [l, tp, r, b] = textBox(t, W, H);
+  const px = x * W;
+  const py = y * H;
+  return px >= l - radiusPx && px <= r + radiusPx && py >= tp - radiusPx && py <= b + radiusPx;
 }

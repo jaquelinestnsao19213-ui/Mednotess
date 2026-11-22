@@ -1,7 +1,7 @@
 // Modelo das anotações. Tudo é guardado em coordenadas NORMALIZADAS (0 a 1)
 // em relação à página, então o desenho acompanha qualquer zoom ou tamanho de tela.
 
-export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "note" | "select" | "clip";
+export type Tool = "hand" | "pen" | "highlighter" | "circle" | "eraser" | "note" | "select" | "clip" | "text";
 
 export type InkItem = {
   id: string;
@@ -32,7 +32,11 @@ export type Note = { id: string; x: number; y: number; text: string; color: stri
 // Comentário copiado (para colar em outro lugar do PDF)
 export type NoteClip = Pick<Note, "text" | "html" | "color" | "w" | "h" | "fs">;
 
-export type PageAnn = { items: Item[]; notes: Note[] };
+// Texto digitado que substitui a escrita à mão (conversão). x = início do texto (fração da largura),
+// y = centro da linha (fração da ALTURA), size = altura da letra (fração da LARGURA), font = lista de fontes CSS (null = padrão).
+export type PdfText = { id: string; kind: "text"; x: number; y: number; text: string; size: number; font: string | null; color: string };
+
+export type PageAnn = { items: Item[]; notes: Note[]; texts?: PdfText[] };
 
 export const EMPTY: PageAnn = { items: [], notes: [] };
 
@@ -47,6 +51,7 @@ export function normalizeAnn(data: unknown): PageAnn {
   return {
     items: Array.isArray(d.items) ? (d.items as Item[]) : [],
     notes: Array.isArray(d.notes) ? (d.notes as Note[]) : [],
+    ...(Array.isArray(d.texts) && d.texts.length ? { texts: d.texts as PdfText[] } : {}),
   };
 }
 
@@ -98,6 +103,37 @@ export const opMoveNote = (
   undo: (a) => ({ ...a, notes: a.notes.map((n) => (n.id === id ? { ...n, x: from.x, y: from.y } : n)) }),
 });
 
+// Converter escrita: some a letra à mão e entra o texto (desfazer volta a letra à mão).
+export const opConvert = (page: number, removed: Item[], added: PdfText[]): Op => {
+  const rm = new Set(removed.map((i) => i.id));
+  const ad = new Set(added.map((t) => t.id));
+  return {
+    page,
+    redo: (a) => ({ ...a, items: a.items.filter((i) => !rm.has(i.id)), texts: [...(a.texts ?? []), ...added] }),
+    undo: (a) => ({ ...a, items: [...a.items, ...removed], texts: (a.texts ?? []).filter((t) => !ad.has(t.id)) }),
+  };
+};
+
+// Corrigir texto, trocar tamanho ou fonte (por id).
+export const opPatchTexts = (page: number, before: PdfText[], after: PdfText[]): Op => {
+  const put = (list: PdfText[]) => (a: PageAnn): PageAnn => {
+    const m = new Map(list.map((t) => [t.id, t]));
+    return { ...a, texts: (a.texts ?? []).map((t) => m.get(t.id) ?? t) };
+  };
+  return { page, redo: put(after), undo: put(before) };
+};
+
+// Apagar traços e textos juntos (borracha ou texto esvaziado).
+export const opRemoveMixed = (page: number, items: Item[], texts: PdfText[]): Op => {
+  const ids = new Set(items.map((i) => i.id));
+  const tids = new Set(texts.map((t) => t.id));
+  return {
+    page,
+    redo: (a) => ({ ...a, items: a.items.filter((i) => !ids.has(i.id)), texts: (a.texts ?? []).filter((t) => !tids.has(t.id)) }),
+    undo: (a) => ({ ...a, items: [...a.items, ...items], texts: [...(a.texts ?? []), ...texts] }),
+  };
+};
+
 // ---------- Ferramentas ----------
 export const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "hand", label: "Navegar", glyph: "✋" },
@@ -106,6 +142,7 @@ export const TOOLS: { id: Tool; label: string; glyph: string }[] = [
   { id: "circle", label: "Círculo", glyph: "◯" },
   { id: "eraser", label: "Borracha", glyph: "⌫" },
   { id: "note", label: "Comentário", glyph: "💬" },
+  { id: "text", label: "Converter escrita", glyph: "Aa" },
   { id: "select", label: "Selecionar texto", glyph: "T" },
   { id: "clip", label: "Copiar imagem", glyph: "✂" },
 ];
