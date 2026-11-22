@@ -56,6 +56,7 @@ type Session =
   | { kind: "ink"; pid: number; tool: "pen" | "highlighter"; color: string; width: number; pts: number[] }
   | { kind: "ellipse"; pid: number; color: string; width: number; x0: number; y0: number; x1: number; y1: number }
   | { kind: "lasso"; pid: number; pts: number[] }
+  | { kind: "drag"; pid: number; sx: number; sy: number; base: PageAnn; ids: Set<string>; moved: boolean }
   | { kind: "erase"; pid: number; cur: PageAnn; removed: Item[]; removedTexts: TextItem[] };
 
 type Crop = { x0: number; y0: number; x1: number; y1: number };
@@ -66,13 +67,76 @@ const TEXT_SCALE = 2;
 const GHOST_A = 0.18; // depois da conversão, a letra à mão fica clarinha atrás do texto para você conferir
 const GHOST_MS = 9000;
 const HOVER_EXTRA_MS = 1500; // caneta pairando: a conversão sai depois da pausa mais esse tempo
-const SEL_TAP_PX = 8; // laço sem arrastar mais que isso = toque (abre a correção do texto)
+const SEL_TAP_PX = 8; // laço/arrasto sem mexer mais que isso = toque (abre a correção do texto)
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
 const r4 = (v: number) => Math.round(v * 10000) / 10000;
 
 // Traço do PDF (y pela altura) para o espaço do reconhecedor (x e y pela largura).
 const toW = (it: InkItem, r: number): InkItem => ({ ...it, pts: it.pts.map((v, i) => (i % 2 ? v * r : v)) });
+
+// ---------- Mover e aumentar a seleção do laço ----------
+// Traços e círculos: x pela largura e y pela altura. Textos convertidos: x e y pela largura (y de texto = y da página × r).
+function mapSel(a: PageAnn, ids: Set<string>, fi: (it: Item) => Item, ft: (t: TextItem) => TextItem): PageAnn {
+  return {
+    ...a,
+    items: a.items.map((it) => (ids.has(it.id) ? fi(it) : it)),
+    texts: (a.texts ?? []).map((t) => (ids.has(t.id) ? ft(t) : t)),
+  };
+}
+
+function shiftItem(it: Item, dx: number, dy: number): Item {
+  if (it.kind === "ink") return { ...it, pts: it.pts.map((v, i) => v + (i % 2 ? dy : dx)) };
+  return { ...it, cx: it.cx + dx, cy: it.cy + dy };
+}
+
+function scaleItem(it: Item, s: number, cx: number, cy: number): Item {
+  if (it.kind === "ink") return { ...it, pts: it.pts.map((v, i) => (i % 2 ? cy + (v - cy) * s : cx + (v - cx) * s)) };
+  return { ...it, cx: cx + (it.cx - cx) * s, cy: cy + (it.cy - cy) * s, rx: it.rx * s, ry: it.ry * s };
+}
+
+function scaleText(t: TextItem, s: number, cx: number, cyW: number): TextItem {
+  return { ...t, x: cx + (t.x - cx) * s, y: cyW + (t.y - cyW) * s, size: t.size * s };
+}
+
+// Caixa da seleção em coordenadas normalizadas da página (x pela largura, y pela altura).
+function selBox(a: PageAnn, ids: Set<string>, r: number, w: number): { x0: number; y0: number; x1: number; y1: number } | null {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  const add = (x: number, y: number) => {
+    x0 = Math.min(x0, x);
+    x1 = Math.max(x1, x);
+    y0 = Math.min(y0, y);
+    y1 = Math.max(y1, y);
+  };
+  for (const it of a.items) {
+    if (!ids.has(it.id)) continue;
+    if (it.kind === "ink") for (let i = 0; i + 1 < it.pts.length; i += 2) add(it.pts[i], it.pts[i + 1]);
+    else {
+      add(it.cx - it.rx, it.cy - it.ry);
+      add(it.cx + it.rx, it.cy + it.ry);
+    }
+  }
+  for (const t of a.texts ?? []) {
+    if (!ids.has(t.id)) continue;
+    const b = textBounds(t, w);
+    add(b[0], b[1] / r);
+    add(b[2], b[3] / r);
+  }
+  return x0 <= x1 && y0 <= y1 ? { x0, y0, x1, y1 } : null;
+}
+
+// Entra no histórico (↶ desfaz): a seleção volta para onde estava.
+function selOp(page: number, before: PageAnn, after: PageAnn, ids: Set<string>): Op {
+  return opTextChange(page, {
+    rmItems: before.items.filter((i) => ids.has(i.id)),
+    addItems: after.items.filter((i) => ids.has(i.id)),
+    rmTexts: (before.texts ?? []).filter((t) => ids.has(t.id)),
+    addTexts: (after.texts ?? []).filter((t) => ids.has(t.id)),
+  });
+}
 
 function saveBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
@@ -118,6 +182,8 @@ function PdfPageView(p: PageProps) {
   const [convBusy, setConvBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [selIds, setSelIds] = useState<string[]>([]);
+  const selRef = useRef<string[]>([]);
+  selRef.current = selIds;
   const [ghost, setGhost] = useState<Item[] | null>(null);
   const [editIds, setEditIds] = useState<string[] | null>(null);
   const [lastConv, setLastConv] = useState<string[]>([]);
@@ -130,6 +196,10 @@ function PdfPageView(p: PageProps) {
   const penHover = useRef(false);
   const busy = useRef(false);
   const runRef = useRef<(only: Set<string> | null, manual: boolean) => void>(() => undefined);
+
+  // Pinça com dois dedos sobre a seleção do laço: aumenta ou diminui o que está selecionado.
+  const touches = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinch = useRef<{ d0: number; base: PageAnn; cx: number; cy: number } | null>(null);
 
   // A página só é redesenhada em alta resolução depois que o zoom "assenta".
   const [renderW, setRenderW] = useState(width);
@@ -238,6 +308,80 @@ function PdfPageView(p: PageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.tool]);
 
+  // Pinça com dois dedos sobre a página com seleção: aumenta ou diminui só o que está selecionado (sem dar zoom na página).
+  // Fica no documento (fase de captura) para sair na frente do zoom do leitor.
+  useEffect(() => {
+    if (!active || p.tool !== "lasso") return;
+    const inside = (t: EventTarget | null) => t instanceof Node && !!wrap.current?.contains(t);
+    const down = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !inside(e.target) || !selRef.current.length) return;
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.current.size < 2) return;
+      e.stopPropagation();
+      e.preventDefault();
+      if (pinch.current) return;
+      const P = propsRef.current;
+      // O primeiro dedo pode ter começado a arrastar ou a desenhar o laço: volta ao ponto de partida.
+      const s = session.current;
+      let base = annRef.current;
+      if (s && s.kind === "drag") {
+        base = s.base;
+        annRef.current = base;
+        P.onApply(n, base);
+      }
+      if (s) {
+        session.current = null;
+        paintLive();
+      }
+      const box = selBox(base, new Set(selRef.current), P.ratio, P.width);
+      const [a, b] = Array.from(touches.current.values());
+      if (!box || !a || !b) return;
+      pinch.current = { d0: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), base, cx: (box.x0 + box.x1) / 2, cy: (box.y0 + box.y1) / 2 };
+    };
+    const move = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !touches.current.has(e.pointerId)) return;
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const pc = pinch.current;
+      if (!pc) return;
+      e.stopPropagation(); // o dedo não rola a página enquanto a pinça está em andamento
+      e.preventDefault();
+      const [a, b] = Array.from(touches.current.values());
+      if (!a || !b) return;
+      const s = Math.max(0.2, Math.min(6, Math.hypot(a.x - b.x, a.y - b.y) / pc.d0));
+      const r = propsRef.current.ratio;
+      const next = mapSel(
+        pc.base,
+        new Set(selRef.current),
+        (it) => scaleItem(it, s, pc.cx, pc.cy),
+        (t) => scaleText(t, s, pc.cx, pc.cy * r)
+      );
+      annRef.current = next;
+      propsRef.current.onApply(n, next);
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !touches.current.delete(e.pointerId)) return;
+      const pc = pinch.current;
+      if (pc && touches.current.size < 2) {
+        // Ao soltar um dos dedos a pinça termina e o novo tamanho entra no histórico (↶ desfaz).
+        pinch.current = null;
+        if (pc.base !== annRef.current) propsRef.current.onRecord(selOp(n, pc.base, annRef.current, new Set(selRef.current)));
+      }
+    };
+    document.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointermove", move, { capture: true, passive: false });
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+      touches.current.clear();
+      pinch.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, p.tool, n]);
+
   // 2) Desenha as anotações salvas (camada separada, por cima do PDF).
   useEffect(() => {
     if (!active) return;
@@ -272,37 +416,20 @@ function PdfPageView(p: PageProps) {
       }
       for (const t of p.ann.texts ?? []) drawText(ctx, t, W);
       if (selIds.length) {
-        const sel = new Set(selIds);
-        let x0 = Infinity;
-        let y0 = Infinity;
-        let x1 = -Infinity;
-        let y1 = -Infinity;
-        for (const it of p.ann.items) {
-          if (it.kind !== "ink" || !sel.has(it.id)) continue;
-          for (let i = 0; i + 1 < it.pts.length; i += 2) {
-            x0 = Math.min(x0, it.pts[i] * W);
-            x1 = Math.max(x1, it.pts[i] * W);
-            y0 = Math.min(y0, it.pts[i + 1] * H);
-            y1 = Math.max(y1, it.pts[i + 1] * H);
-          }
-        }
-        for (const t of p.ann.texts ?? []) {
-          if (!sel.has(t.id)) continue;
-          const b = textBounds(t, W);
-          x0 = Math.min(x0, b[0] * W);
-          x1 = Math.max(x1, b[2] * W);
-          y0 = Math.min(y0, b[1] * W);
-          y1 = Math.max(y1, b[3] * W);
-        }
-        if (x0 < x1 || y0 < y1) {
+        const box = selBox(p.ann, new Set(selIds), H / W, W);
+        if (box) {
           const pad = 6 * dpr;
+          const x0 = box.x0 * W - pad;
+          const y0 = box.y0 * H - pad;
+          const bw = (box.x1 - box.x0) * W + pad * 2;
+          const bh = (box.y1 - box.y0) * H + pad * 2;
           ctx.save();
           ctx.setLineDash([6 * dpr, 5 * dpr]);
           ctx.strokeStyle = "#2563eb";
           ctx.fillStyle = "rgba(37,99,235,.07)";
           ctx.lineWidth = 1.5 * dpr;
-          ctx.fillRect(x0 - pad, y0 - pad, x1 - x0 + pad * 2, y1 - y0 + pad * 2);
-          ctx.strokeRect(x0 - pad, y0 - pad, x1 - x0 + pad * 2, y1 - y0 + pad * 2);
+          ctx.fillRect(x0, y0, bw, bh);
+          ctx.strokeRect(x0, y0, bw, bh);
           ctx.restore();
         }
       }
@@ -318,7 +445,7 @@ function PdfPageView(p: PageProps) {
     if (!ctx) return;
     ctx.clearRect(0, 0, live.width, live.height);
     const s = session.current;
-    if (!s || s.kind === "erase") return;
+    if (!s || s.kind === "erase" || s.kind === "drag") return;
     if (s.kind === "lasso") {
       if (s.pts.length < 4) return;
       const k = live.width / width;
@@ -367,6 +494,21 @@ function PdfPageView(p: PageProps) {
     } else if (s.kind === "lasso") {
       const len = s.pts.length;
       if (Math.hypot((x - s.pts[len - 2]) * width, (y - s.pts[len - 1]) * height) >= 1) s.pts.push(x, y);
+    } else if (s.kind === "drag") {
+      // Arrastar a seleção: traços, círculos e textos acompanham o dedo ou a caneta.
+      const dx = x - s.sx;
+      const dy = y - s.sy;
+      if (!s.moved && Math.hypot(dx * width, dy * height) < SEL_TAP_PX) return;
+      s.moved = true;
+      const r = height / width;
+      const next = mapSel(
+        s.base,
+        s.ids,
+        (it) => shiftItem(it, dx, dy),
+        (t) => ({ ...t, x: t.x + dx, y: t.y + dy * r })
+      );
+      annRef.current = next;
+      p.onApply(n, next);
     } else if (s.kind === "ellipse") {
       s.x1 = x;
       s.y1 = y;
@@ -405,8 +547,17 @@ function PdfPageView(p: PageProps) {
     } else if (p.tool === "circle") {
       s = { kind: "ellipse", pid: e.pointerId, color: p.color, width: p.size, x0: x, y0: y, x1: x, y1: y };
     } else if (p.tool === "lasso") {
-      if (!editIds) setSelIds([]);
-      s = { kind: "lasso", pid: e.pointerId, pts: [x, y] };
+      const box = !editIds && selIds.length ? selBox(annRef.current, new Set(selIds), height / width, width) : null;
+      const slack = e.pointerType === "touch" ? 24 : 10; // com o dedo, a área de pegar a seleção é maior
+      const px = x * width;
+      const py = y * height;
+      if (box && px >= box.x0 * width - slack && px <= box.x1 * width + slack && py >= box.y0 * height - slack && py <= box.y1 * height + slack) {
+        // Começou dentro da seleção: arrastar move tudo o que está selecionado.
+        s = { kind: "drag", pid: e.pointerId, sx: x, sy: y, base: annRef.current, ids: new Set(selIds), moved: false };
+      } else {
+        if (!editIds) setSelIds([]);
+        s = { kind: "lasso", pid: e.pointerId, pts: [x, y] };
+      }
     } else {
       s = { kind: "erase", pid: e.pointerId, cur: annRef.current, removed: [], removedTexts: [] };
       move(s, e.clientX, e.clientY);
@@ -452,6 +603,22 @@ function PdfPageView(p: PageProps) {
     if (!s || s.pid !== e.pointerId) return;
     session.current = null;
     const before = annRef.current;
+    if (s.kind === "drag") {
+      if (cancelled || !s.moved) {
+        if (s.moved) {
+          annRef.current = s.base;
+          p.onApply(n, s.base);
+        } else if (!cancelled && s.ids.size === 1) {
+          // Só um toque num texto convertido já selecionado: abre a correção das palavras.
+          const only = Array.from(s.ids)[0];
+          if ((s.base.texts ?? []).some((t) => t.id === only)) openEdit([only]);
+        }
+      } else {
+        p.onRecord(selOp(n, s.base, annRef.current, s.ids));
+      }
+      paintLive();
+      return;
+    }
     if (s.kind === "lasso") {
       if (!cancelled) {
         const r = height / width;
@@ -1075,7 +1242,7 @@ function PdfPageView(p: PageProps) {
                 </div>
               )}
               <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                A letra vira texto no mesmo lugar e na mesma cor. Use o ⬚ Laço para escolher um trecho, tocar no texto e corrigir palavras, ou marcar "Manter como desenho". Precisa de internet.
+                A letra vira texto no mesmo lugar e na mesma cor. Use o ⬚ Laço para escolher um trecho, arrastar para mover, abrir a pinça com dois dedos para aumentar ou diminuir, tocar no texto e corrigir palavras, ou marcar "Manter como desenho". Precisa de internet.
               </p>
             </div>
           )}
