@@ -26,7 +26,8 @@ export type EllipseItem = {
 export type Item = InkItem | EllipseItem;
 
 // text = texto simples (busca e comentário vazio); html = texto formatado; w/h = tamanho da caixa (px); fs = tamanho da letra (px)
-export type Note = { id: string; x: number; y: number; text: string; color: string; html?: string; w?: number; h?: number; fs?: number };
+// ro = comentário da dona do caderno visto por um visitante de link publicado (só leitura; nunca é salvo)
+export type Note = { id: string; x: number; y: number; text: string; color: string; html?: string; w?: number; h?: number; fs?: number; ro?: boolean };
 
 // Comentário copiado (para colar em outro lugar do PDF)
 export type NoteClip = Pick<Note, "text" | "html" | "color" | "w" | "h" | "fs">;

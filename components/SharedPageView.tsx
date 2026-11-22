@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -17,6 +18,7 @@ import { AudioNote, VideoNote } from "./editor/media-extensions";
 import { InkBlock } from "./editor/ink-extension";
 import InkOverlay, { readInkLayer } from "./editor/InkOverlay";
 import { toDoc } from "@/lib/doc";
+import { SharedViewContext, setVisitorMode } from "@/lib/shared-view";
 
 export type SharedPage = {
   id: string;
@@ -29,9 +31,18 @@ export type SharedPage = {
 };
 
 // Página publicada: mesmo visual da página original, mas somente leitura (sem barra de edição).
-export default function SharedPageView({ page }: { page: SharedPage }) {
+// Nos PDFs, o visitante vê os comentários da dona e pode fazer os próprios (ficam só neste aparelho).
+export default function SharedPageView({ page, token }: { page: SharedPage; token?: string }) {
   const doc = toDoc(page.content);
   const layer = readInkLayer(doc.inkLayer);
+
+  const view = useMemo(() => (token ? { token } : null), [token]);
+
+  // Visitante não tem conta: imagens colocadas em comentários ficam embutidas no comentário.
+  useEffect(() => {
+    setVisitorMode(true);
+    return () => setVisitorMode(false);
+  }, []);
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -68,8 +79,10 @@ export default function SharedPageView({ page }: { page: SharedPage }) {
   const isLesson = page.type === "lesson";
 
   return (
-    <>
-      <p className="muted small" style={{ margin: "0 0 8px" }}>Página compartilhada · somente leitura</p>
+    <SharedViewContext.Provider value={view}>
+      <p className="muted small" style={{ margin: "0 0 8px" }}>
+        Página compartilhada · somente leitura. Os seus comentários e marcações nos PDFs ficam só neste aparelho.
+      </p>
 
       {page.cover_url && <div className="cover" style={{ backgroundImage: `url(${page.cover_url})` }} />}
 
@@ -92,6 +105,6 @@ export default function SharedPageView({ page }: { page: SharedPage }) {
           </div>
         </div>
       )}
-    </>
+    </SharedViewContext.Provider>
   );
 }

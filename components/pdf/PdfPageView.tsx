@@ -5,6 +5,7 @@ import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { loadPdfjs } from "@/lib/pdfjs";
 import { drawItem, drawItems, hitItem } from "./draw";
 import NoteCard from "./NoteCard";
+import ReadOnlyNote from "./ReadOnlyNote";
 import {
   opAddItem,
   opAddNote,
@@ -345,6 +346,7 @@ function PdfPageView(p: PageProps) {
   // ---------- Mover o emblema do comentário (arrastar) ----------
   function onPinDown(e: React.PointerEvent<HTMLButtonElement>, note: Note) {
     if (!p.editable) return;
+    if (note.ro) return; // comentário da dona do caderno (link publicado): não se move
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const [px, py] = toPage(e.clientX, e.clientY);
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -585,10 +587,10 @@ function PdfPageView(p: PageProps) {
         <div key={note.id} data-nopan="" onPointerDown={(e) => e.stopPropagation()}>
           <button
             type="button"
-            className="pdfnote-pin"
+            className={note.ro ? "pdfnote-pin ro" : "pdfnote-pin"}
             style={{ left: `${note.x * 100}%`, top: `${note.y * 100}%`, background: note.color }}
-            aria-label="Abrir comentário (arraste para mover)"
-            title="Toque para abrir • arraste para mover"
+            aria-label={note.ro ? "Abrir comentário do caderno" : "Abrir comentário (arraste para mover)"}
+            title={note.ro ? "Comentário do caderno (somente leitura)" : "Toque para abrir • arraste para mover"}
             onPointerDown={(e) => onPinDown(e, note)}
             onPointerMove={onPinMove}
             onPointerUp={onPinUp}
@@ -600,16 +602,19 @@ function PdfPageView(p: PageProps) {
           >
             💬
           </button>
-          {p.openNoteId === note.id && (
-            <NoteCard
-              note={note}
-              onPatch={(patch) => patchNote(note.id, patch)}
-              onDelete={() => p.onNoteDelete(n, note.id)}
-              onClose={() => p.onOpenNote(null)}
-              onCopy={p.onCopyNote}
-              onDuplicate={() => duplicateNote(note.id)}
-            />
-          )}
+          {p.openNoteId === note.id &&
+            (note.ro ? (
+              <ReadOnlyNote note={note} onClose={() => p.onOpenNote(null)} onCopy={p.onCopyNote} />
+            ) : (
+              <NoteCard
+                note={note}
+                onPatch={(patch) => patchNote(note.id, patch)}
+                onDelete={() => p.onNoteDelete(n, note.id)}
+                onClose={() => p.onOpenNote(null)}
+                onCopy={p.onCopyNote}
+                onDuplicate={() => duplicateNote(note.id)}
+              />
+            ))}
         </div>
       ))}
     </div>

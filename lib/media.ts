@@ -1,5 +1,6 @@
 import type { Editor } from "@tiptap/core";
 import { supabase } from "./supabase";
+import { isVisitorMode } from "./shared-view";
 
 // Áudios e vídeos ficam no mesmo bucket "files" do Supabase que já guarda imagens e PDFs.
 // Nada aqui usa IA, transcrição ou serviço pago: só o armazenamento que o app já tem.
@@ -53,8 +54,44 @@ export function mediaKindOf(file: { name?: string; type?: string }): "audio" | "
   return null;
 }
 
+function readAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("leitura"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Visitante de um link publicado: a imagem é reduzida e fica embutida no próprio comentário (neste aparelho).
+async function shrinkImage(file: Blob): Promise<string> {
+  const MAX = 1280;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, MAX / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+    return canvas.toDataURL("image/jpeg", 0.82);
+  } catch {
+    return readAsDataUrl(file);
+  }
+}
+
 /** Envia o arquivo para a pasta da usuária no Storage e devolve o endereço público. */
 export async function uploadMedia(file: Blob, ext: string): Promise<string> {
+  if (isVisitorMode()) {
+    if (!(file.type || "").startsWith("image/")) throw new Error("Visitante");
+    return shrinkImage(file);
+  }
   const { data } = await supabase.auth.getUser();
   if (!data.user) throw new Error("Sem login");
   const path = `${data.user.id}/${crypto.randomUUID()}.${ext || "bin"}`;
@@ -85,6 +122,7 @@ export function mediaErrorMessage(cause: unknown): string {
       : cause && typeof cause === "object" && "message" in cause
         ? String((cause as { message: unknown }).message)
         : "";
+  if (/Visitante/i.test(message)) return "Neste link compartilhado só dá para colocar imagens nos comentários.";
   if (/Sem login/i.test(message)) return "Sua sessão expirou. Entre novamente.";
   if (/exceed|too large|payload|maximum allowed/i.test(message)) {
     return "O arquivo é maior que o limite do armazenamento (50 MB no plano gratuito do Supabase). Comprima o arquivo ou, no caso de vídeo, use o link do YouTube.";

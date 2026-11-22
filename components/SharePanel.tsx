@@ -78,7 +78,7 @@ export default function SharePanel({ pageId, pageTitle, token, onToken }: Props)
           {token ? (
             <>
               <p className="muted small" style={{ margin: "0 0 6px" }}>
-                Quem tiver este link vê a página como ela está agora (inclusive os vídeos), mas não consegue editar. Quando você muda a página, o link mostra a versão nova.
+                Quem tiver este link vê esta página e tudo que está dentro dela (cadernos, aulas, páginas e PDFs, com os seus comentários), como estão agora, mas não consegue editar. Os comentários que a pessoa fizer nos PDFs ficam só no aparelho dela. Quando você muda algo, o link mostra a versão nova.
               </p>
               <input className="link-box-input" readOnly value={link} onFocus={(e) => e.currentTarget.select()} aria-label="Link da página compartilhada" />
               <div className="sheet-row">
@@ -92,7 +92,7 @@ export default function SharePanel({ pageId, pageTitle, token, onToken }: Props)
           ) : (
             <>
               <p className="muted small" style={{ margin: "0 0 6px" }}>
-                Cria um link para outras pessoas verem esta página (somente leitura). Qualquer pessoa com o link consegue abrir, sem precisar de conta. As suas outras páginas não ficam visíveis.
+                Cria um link para outras pessoas verem esta página e tudo que está dentro dela (somente leitura). Qualquer pessoa com o link consegue abrir, sem precisar de conta. Páginas e cadernos que estão fora desta não ficam visíveis.
               </p>
               <div className="sheet-row">
                 <button type="button" className="chip on" disabled={busy} onClick={() => void publish()}>{busy ? "Publicando…" : "Publicar página"}</button>
