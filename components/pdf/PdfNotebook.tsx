@@ -109,6 +109,10 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   const [pasteMode, setPasteMode] = useState(false);
   const [toast, setToast] = useState("");
 
+  // Exportar uma cópia do PDF com as anotações gravadas (baixar ou compartilhar).
+  const [exporting, setExporting] = useState(false);
+  const [canShare, setCanShare] = useState(false);
+
   const rootRef = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
@@ -148,6 +152,10 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   }, []);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+
+  useEffect(() => {
+    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function" && typeof navigator.canShare === "function");
+  }, []);
 
   // ---------- Abrir o PDF (só quando o caderno chega perto da tela) ----------
   useEffect(() => {
@@ -705,6 +713,52 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
     }
   }
 
+  // Gera uma cópia do PDF com traços, marca-texto, círculos e comentários gravados nela.
+  // O PDF original e as anotações salvas no caderno não mudam.
+  async function exportPdf(how: "save" | "share") {
+    if (exporting || !doc) return;
+    setExporting(true);
+    window.clearTimeout(toastTimer.current);
+    setToast("Preparando o PDF com as anotações…");
+    try {
+      const { buildAnnotatedPdf, exportFileName } = await import("@/lib/pdf-export");
+      const bytes = await buildAnnotatedPdf(url, ann.pages, {
+        title: name,
+        onProgress: (_done, _total, label) => setToast(label),
+      });
+      const fileName = exportFileName(name);
+      const blob = new Blob([bytes as unknown as BlobPart], { type: "application/pdf" });
+      if (how === "share") {
+        const file = new File([blob], fileName, { type: "application/pdf" });
+        if (navigator.canShare?.({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file], title: fileName });
+            flash("PDF com anotações compartilhado.");
+          } catch (e) {
+            if ((e as { name?: string })?.name === "AbortError") setToast("");
+            else throw e;
+          }
+          return;
+        }
+        // Este aparelho não compartilha arquivos: baixa em vez disso.
+      }
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = href;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 60000);
+      flash("PDF com anotações salvo (veja em Downloads).");
+    } catch (e) {
+      const msg = e instanceof Error && e.message ? e.message : "";
+      flash(`Não consegui gerar o PDF com anotações. ${msg}`.trim());
+    } finally {
+      setExporting(false);
+    }
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     const el = e.target as HTMLElement;
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") return;
@@ -772,6 +826,26 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
           {full ? "Sair" : "Tela cheia"}
         </button>
         <a className="pdfnb-btn" href={url} target="_blank" rel="noopener noreferrer" aria-label="Abrir o PDF original em outra aba">Original ↗</a>
+        <button
+          type="button"
+          className="pdfnb-btn"
+          disabled={!doc || !ann.loaded || ann.loadError || exporting}
+          title="Baixa uma cópia do PDF com seus traços, marca-texto, círculos e comentários"
+          onClick={() => void exportPdf("save")}
+        >
+          {exporting ? "Gerando…" : "⬇ Salvar com anotações"}
+        </button>
+        {canShare && (
+          <button
+            type="button"
+            className="pdfnb-btn"
+            disabled={!doc || !ann.loaded || ann.loadError || exporting}
+            title="Envia a cópia com anotações para outro app (Drive, WhatsApp, e-mail…)"
+            onClick={() => void exportPdf("share")}
+          >
+            Compartilhar
+          </button>
+        )}
         {onRemove && (
           <button
             type="button"
