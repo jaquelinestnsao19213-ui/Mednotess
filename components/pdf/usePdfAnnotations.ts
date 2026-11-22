@@ -31,7 +31,7 @@ function writePending(url: string, obj: Record<string, PageAnn>) {
 function combine(base: PageAnn | undefined, mine: PageAnn | undefined): PageAnn {
   const m = mine ?? EMPTY;
   if (!base) return m;
-  return { items: [...base.items, ...m.items], notes: [...base.notes, ...m.notes] };
+  return { items: [...base.items, ...m.items], notes: [...base.notes, ...m.notes], texts: [...(base.texts ?? []), ...(m.texts ?? [])] };
 }
 
 // Tira de volta as anotações da dona, para que só o que é do visitante seja salvo.
@@ -39,9 +39,11 @@ function stripBase(base: PageAnn | undefined, a: PageAnn): PageAnn {
   if (!base) return a;
   const itemIds = new Set(base.items.map((i) => i.id));
   const noteIds = new Set(base.notes.map((n) => n.id));
+  const textIds = new Set((base.texts ?? []).map((t) => t.id));
   return {
     items: a.items.filter((i) => !itemIds.has(i.id)),
     notes: a.notes.filter((n) => !noteIds.has(n.id) && !n.ro),
+    texts: (a.texts ?? []).filter((t) => !textIds.has(t.id)),
   };
 }
 
@@ -214,7 +216,7 @@ export function usePdfAnnotations(url: string) {
         if (!error && Array.isArray(data)) {
           for (const row of data as { page_number: number; data: unknown }[]) {
             const a = normalizeAnn(row.data);
-            owner[row.page_number] = { items: a.items, notes: a.notes.map((x) => ({ ...x, ro: true })) };
+            owner[row.page_number] = { items: a.items, notes: a.notes.map((x) => ({ ...x, ro: true })), texts: a.texts };
           }
         }
         baseRef.current = owner;
