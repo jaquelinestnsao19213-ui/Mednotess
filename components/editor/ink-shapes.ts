@@ -214,7 +214,9 @@ export function recognizeShape(pts: number[], w: number): Shape | null {
   const rr = rs.map((p) => Math.hypot((p.x - cx) / rx, (p.y - cy) / ry));
   const mean = rr.reduce((s, v) => s + v, 0) / rr.length;
   const std = Math.sqrt(rr.reduce((s, v) => s + (v - mean) ** 2, 0) / rr.length);
-  if (std / mean < 0.09 && mean > 0.85 && mean < 1.15) {
+  // Aceita círculo desenhado com mais de uma volta (voltas um pouco desencontradas): tolerância maior, mas a média
+  // do raio fica abaixo da de um retângulo (cantos fazem a média passar de ~1,15).
+  if (std / mean < 0.14 && mean > 0.8 && mean < 1.1) {
     if (Math.abs(rx - ry) / Math.max(rx, ry) < 0.12) {
       const r = (rx + ry) / 2;
       return { kind: "ellipse", cx, cy, rx: r, ry: r };
