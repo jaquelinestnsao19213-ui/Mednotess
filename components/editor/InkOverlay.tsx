@@ -41,6 +41,9 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
 ];
 
 const FADE_MS = 320; // duração da transição da letra à mão para o texto
+const GHOST_A = 0.18; // depois da conversão, a letra à mão fica bem clarinha atrás do texto para você conferir
+const GHOST_MS = 9000; // por quanto tempo a letra clarinha fica (some antes se você voltar a escrever)
+const HOVER_EXTRA_MS = 1500; // caneta parada pairando sobre a tela: a conversão sai depois da pausa mais esse tempo
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
@@ -50,6 +53,7 @@ const TAP_MS = 250; // toque rápido da caneta (sem arrastar) conta como "toque"
 const TAP_MOVE_PX = 6; // quanto a caneta pode se mexer e ainda ser um toque
 const DOUBLE_TAP_MS = 400; // dois toques da caneta nesse intervalo e perto um do outro = colocar o cursor ali
 const DOUBLE_TAP_PX = 30;
+const SEL_TAP_PX = 6; // com o laço, tocar num texto sem arrastar mais que isso abre a correção do texto
 
 // Coloca o cursor do texto no ponto da tela (x, y). A camada de escrita fica por cima da página,
 // então ela é "desligada" por um instante para o navegador achar o texto que está por baixo.
@@ -137,6 +141,7 @@ export default function InkOverlay({
 
   // Converter escrita em texto digitado
   const [convOpen, setConvOpen] = useState(false);
+  const [convSettings, setConvSettings] = useState(false);
   const [convFont, setConvFont] = useState(4);
   const [convBusy, setConvBusy] = useState(false);
   const [convErr, setConvErr] = useState<string | null>(null);
@@ -144,6 +149,15 @@ export default function InkOverlay({
   const [convIds, setConvIds] = useState<string[]>([]);
   const [convPos, setConvPos] = useState<{ left: number; top: number } | null>(null);
   const [convErase, setConvErase] = useState(true);
+
+  // Corrigir o texto já convertido, direto no lugar (cada linha vira um campo de texto).
+  const [editIds, setEditIds] = useState<string[] | null>(null);
+  const editBaseRef = useRef<LayerItem[] | null>(null);
+  // Textos que acabaram de ser convertidos (para o botão "Corrigir" logo depois da conversão automática).
+  const [lastConv, setLastConv] = useState<string[]>([]);
+  // Letra à mão que acabou de ser convertida: fica clarinha atrás do texto só para conferir (não é salva).
+  const ghostRef = useRef<Item[] | null>(null);
+  const ghostTimerRef = useRef(0);
 
   // Conversão automática: depois de uma pausa (que você escolhe), a escrita recente vira texto na fonte escolhida, no mesmo lugar
   const [autoOn, setAutoOn] = useState(false);
@@ -316,16 +330,27 @@ export default function InkOverlay({
       mctx.clearRect(0, 0, w, h);
     }
 
-    // Transição da conversão: a escrita à mão some e o texto aparece, em poucos quadros.
+    // Transição da conversão: a escrita à mão some (até ficar clarinha) e o texto aparece, em poucos quadros.
     const fade = fadeRef.current;
     let k = 1;
     if (fade) {
       const t = Math.min(1, (performance.now() - fade.t0) / FADE_MS);
       k = t * t * (3 - 2 * t);
-      if (t >= 1) fadeRef.current = null;
+      if (t >= 1) {
+        fadeRef.current = null;
+      } else {
+        ctx.save();
+        ctx.globalAlpha = Math.max(ghostRef.current ? GHOST_A : 0, 1 - k);
+        for (const g of fade.gone) drawInkItem(ctx, smoothItemCached(g, smooth), w);
+        ctx.restore();
+      }
+    }
+    // A letra à mão que virou texto fica clarinha por alguns segundos, para você conferir se o app leu certo.
+    const ghost = ghostRef.current;
+    if (ghost && !fadeRef.current) {
       ctx.save();
-      ctx.globalAlpha = 1 - k;
-      for (const g of fade.gone) drawInkItem(ctx, smoothItemCached(g, smooth), w);
+      ctx.globalAlpha = GHOST_A;
+      for (const g of ghost) drawInkItem(ctx, smoothItemCached(g, smooth), w);
       ctx.restore();
     }
     for (const it of itemsRef.current) {
@@ -399,6 +424,7 @@ export default function InkOverlay({
       cancelAnimationFrame(fadeLoopRef.current);
       window.clearTimeout(penNearTimerRef.current);
       window.clearTimeout(barTimerRef.current);
+      window.clearTimeout(ghostTimerRef.current);
     },
     []
   );
@@ -548,10 +574,14 @@ export default function InkOverlay({
       penHoverRef.current = false;
       tapRef.current = null;
       lastTapRef.current = null;
+      ghostRef.current = null;
+      editBaseRef.current = null;
       clearLive();
       setConvOpen(false);
       setConvText(null);
       setConvErr(null);
+      setEditIds(null);
+      setLastConv([]);
       setAutoMsg(null);
       window.clearTimeout(autoTimerRef.current);
     }
@@ -566,6 +596,16 @@ export default function InkOverlay({
   }, [writing]);
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
+
+  // O aviso "Convertido" (com o botão Corrigir) some sozinho depois de alguns segundos.
+  useEffect(() => {
+    if (autoMsg !== "Convertido.") return;
+    const t = window.setTimeout(() => {
+      setAutoMsg((m) => (m === "Convertido." ? null : m));
+      setLastConv([]);
+    }, 8000);
+    return () => window.clearTimeout(t);
+  }, [autoMsg]);
 
   // Mostra a barra de ferramentas e programa o sumiço dela (só no modo automático).
   const showBar = useCallback(() => {
@@ -661,6 +701,7 @@ export default function InkOverlay({
     undoRef.current = undoRef.current.map(shift);
     redoRef.current = redoRef.current.map(shift);
     fadeRef.current = null;
+    ghostRef.current = null;
     if (selRef.current.size) {
       selRef.current = new Set();
       setSelIds([]);
@@ -702,8 +743,54 @@ export default function InkOverlay({
         return { left: b[0] * w, top: b[1] * w, right: b[2] * w, bottom: b[3] * w };
       });
 
+  // ---------- Corrigir o texto convertido, direto no lugar ----------
+  // Abre um campo de texto por linha convertida. Cada letra digitada já aparece na página; "Pronto" fecha e entra no histórico (↶).
+  const openEdit = (ids: string[]) => {
+    const want = new Set(ids);
+    const list = itemsRef.current
+      .filter((it): it is TextItem => it.kind === "text" && want.has(it.id))
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+    if (!list.length) return;
+    editBaseRef.current = itemsRef.current;
+    setEditIds(list.map((t) => t.id));
+    setConvOpen(false);
+    setEnhance(false);
+    setAutoMsg((m) => (m === "Convertido." ? null : m));
+    setLastConv([]);
+    setSelection(list.map((t) => t.id));
+  };
+
+  const editTextOf = (id: string, text: string) => {
+    itemsRef.current = itemsRef.current.map((it): LayerItem => (it.kind === "text" && it.id === id ? { ...it, text } : it));
+    schedule();
+    queuePush();
+    setTick((t) => t + 1);
+  };
+
+  const closeEdit = () => {
+    const base = editBaseRef.current;
+    editBaseRef.current = null;
+    const ids = new Set(editIds ?? []);
+    // Campo apagado: a linha some.
+    const empty = itemsRef.current.filter((it) => it.kind === "text" && ids.has(it.id) && !it.text.trim()).map((it) => it.id);
+    if (empty.length) {
+      const gone = new Set(empty);
+      itemsRef.current = itemsRef.current.filter((it) => !gone.has(it.id));
+    }
+    if (base && base !== itemsRef.current) {
+      undoRef.current.push(base);
+      if (undoRef.current.length > 60) undoRef.current.shift();
+      redoRef.current = [];
+    }
+    ghostRef.current = null;
+    queuePush();
+    setEditIds(null);
+    setSelection([]);
+    setTick((t) => t + 1);
+  };
+
   // Conversão automática: lê a escrita recente, troca os traços por texto na fonte escolhida (um item por linha).
-  // A contagem da pausa só começa quando a S Pen sai da área de escrita: pairando, mesmo parada, ela espera.
+  // A contagem da pausa só começa quando a S Pen sai da área de escrita; pairando parada, ela espera um pouco mais e converte.
   const armAuto = () => {
     window.clearTimeout(autoTimerRef.current);
     autoTimerRef.current = 0;
@@ -713,6 +800,18 @@ export default function InkOverlay({
       if (penHoverRef.current) return; // segunda verificação: a caneta voltou durante a espera
       runAutoRef.current();
     }, autoDelayRef.current * 1000);
+  };
+
+  // Caneta pairando sobre a tela: cada movimento reinicia a espera. Se ela ficar parada (ou for embora sem avisar),
+  // a conversão sai depois da pausa mais um tempinho, em vez de esperar para sempre.
+  const armHover = () => {
+    window.clearTimeout(autoTimerRef.current);
+    autoTimerRef.current = 0;
+    if (!autoOnRef.current || !pendingRef.current.size) return;
+    autoTimerRef.current = window.setTimeout(() => {
+      autoTimerRef.current = 0;
+      runAutoRef.current();
+    }, autoDelayRef.current * 1000 + HOVER_EXTRA_MS);
   };
 
   // "only": converte só estes traços (a linha que ficou para trás, ou o que você mandou converter); sem ele, converte tudo o que está esperando.
@@ -783,11 +882,20 @@ export default function InkOverlay({
       const remaining = work.filter((it) => !gone.has(it.id) && stillPresent.has(it.id));
       remaining.forEach((it) => pendingRef.current.add(it.id));
       if (gone.size || fresh.length || updated.size) {
+        const goneItems = base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id));
         fadeRef.current = {
           t0: performance.now(),
-          gone: base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id)),
+          gone: goneItems,
           texts: new Set(fresh.map((t) => t.id)),
         };
+        // A letra à mão fica clarinha atrás do texto por alguns segundos, para conferir.
+        ghostRef.current = goneItems.length ? goneItems : null;
+        window.clearTimeout(ghostTimerRef.current);
+        ghostTimerRef.current = window.setTimeout(() => {
+          ghostTimerRef.current = 0;
+          ghostRef.current = null;
+          scheduleRef.current();
+        }, GHOST_MS);
         const kept = base.filter((it) => !gone.has(it.id)).map((it): LayerItem => (it.kind === "text" ? (updated.get(it.id) ?? it) : it));
         commit([...kept, ...fresh], base);
         schedule();
@@ -796,6 +904,10 @@ export default function InkOverlay({
         setAutoMsg("Parte da escrita não foi reconhecida. Ela foi preservada para você tentar novamente.");
       } else if (failed) {
         setAutoMsg(`${failed} ${failed === 1 ? "linha não foi reconhecida" : "linhas não foram reconhecidas"}.`);
+      } else if (fresh.length || updated.size) {
+        // Deu certo: aparece o botão "Corrigir" para ajustar qualquer palavra que o app tenha lido errado.
+        setLastConv([...fresh.map((t) => t.id), ...Array.from(updated.keys())]);
+        setAutoMsg("Convertido.");
       } else {
         setAutoMsg(null);
       }
@@ -892,6 +1004,20 @@ export default function InkOverlay({
         dragRef.current = { sx: x, sy: y, base: itemsRef.current };
         return;
       }
+      // Tocar num texto convertido seleciona o texto; se soltar sem arrastar, abre a correção das palavras.
+      let hitT: TextItem | null = null;
+      for (let i = itemsRef.current.length - 1; i >= 0; i--) {
+        const it = itemsRef.current[i];
+        if (it.kind === "text" && hitText(it, x, y, size.w, 12)) {
+          hitT = it;
+          break;
+        }
+      }
+      if (hitT) {
+        setSelection([hitT.id]);
+        dragRef.current = { sx: x, sy: y, base: itemsRef.current };
+        return;
+      }
       setSelection([]);
       lassoRef.current = [x, y];
       schedule();
@@ -905,6 +1031,7 @@ export default function InkOverlay({
     }
     const marker = eff === "highlighter";
     clearLive();
+    ghostRef.current = null; // voltou a escrever: a letra clarinha da conversão anterior some
     // Só a caneta (S Pen) guarda a pressão; dedo, mouse e marca-texto continuam com espessura constante.
     const pr0 = !marker && e.pointerType === "pen" ? [Math.round((e.pressure > 0 ? e.pressure : 0.5) * 100) / 100] : null;
     draftRef.current = {
@@ -944,12 +1071,11 @@ export default function InkOverlay({
         return;
       }
     }
-    // Caneta pairando sobre a tela: você ainda está escrevendo, então a conversão só espera
-    // (a contagem começa quando a caneta sair da área, em onPenLeave).
+    // Caneta pairando sobre a tela: você ainda está escrevendo, então a conversão espera.
+    // Cada movimento reinicia a espera; se a caneta ficar parada pairando, a conversão sai depois da pausa mais um tempinho.
     if (e.pointerType === "pen" && pointerRef.current === null) {
       penHoverRef.current = true;
-      window.clearTimeout(autoTimerRef.current);
-      autoTimerRef.current = 0;
+      armHover();
     }
     if (e.pointerId !== pointerRef.current) return;
     e.preventDefault();
@@ -1027,8 +1153,18 @@ export default function InkOverlay({
     }
 
     if (dragRef.current) {
-      const { base } = dragRef.current;
+      const { base, sx, sy } = dragRef.current;
       dragRef.current = null;
+      const [ux, uy] = toPoint(e.clientX, e.clientY);
+      const moved = Math.hypot(ux - sx, uy - sy) * size.w > SEL_TAP_PX;
+      if (!moved) {
+        // Foi só um toque: se for num texto convertido, abre a correção das palavras.
+        itemsRef.current = base;
+        const only = selRef.current.size === 1 ? Array.from(selRef.current)[0] : null;
+        if (only && base.some((it) => it.kind === "text" && it.id === only)) openEdit([only]);
+        schedule();
+        return;
+      }
       if (base !== itemsRef.current) commit(itemsRef.current, base);
       schedule();
       return;
@@ -1097,7 +1233,9 @@ export default function InkOverlay({
           }
         }
         pendingRef.current.add(d.id);
-        armAuto();
+        // Caneta ainda pairando: a espera conta mesmo assim (um pouco mais longa), senão a conversão nunca sairia.
+        if (penHoverRef.current) armHover();
+        else armAuto();
       }
     }
   };
@@ -1145,6 +1283,9 @@ export default function InkOverlay({
     redoRef.current.push(itemsRef.current);
     itemsRef.current = prev;
     fadeRef.current = null;
+    ghostRef.current = null;
+    editBaseRef.current = null;
+    setEditIds(null);
     pushNow();
     setSelection([]);
     setTick((t) => t + 1);
@@ -1156,6 +1297,9 @@ export default function InkOverlay({
     undoRef.current.push(itemsRef.current);
     itemsRef.current = next;
     fadeRef.current = null;
+    ghostRef.current = null;
+    editBaseRef.current = null;
+    setEditIds(null);
     pushNow();
     setSelection([]);
     setTick((t) => t + 1);
@@ -1195,6 +1339,33 @@ export default function InkOverlay({
       base
     );
     schedule();
+  };
+
+  // "Manter como desenho": os traços de caneta selecionados nunca viram texto (seta, risco, sublinhado, esquema...).
+  const keepAsDrawing = () => {
+    const base = itemsRef.current;
+    const picked = selRef.current;
+    commit(
+      base.map((it): LayerItem => (picked.has(it.id) && it.kind === "ink" && it.tool === "pen" ? ({ ...it, keep: true, force: false } as LayerItem) : it)),
+      base
+    );
+    picked.forEach((id) => pendingRef.current.delete(id));
+    setAutoMsg("Marcado como desenho: não vira texto.");
+    setSelection([]);
+  };
+
+  // "Converter como texto": força a conversão dos traços selecionados, mesmo que o app ache que são um desenho (ex.: um "l", um "1" ou um hífen).
+  const forceText = () => {
+    const base = itemsRef.current;
+    const picked = new Set(Array.from(selRef.current).filter((id) => base.some((it) => it.id === id && it.kind === "ink" && it.tool === "pen")));
+    if (!picked.size) return;
+    commit(
+      base.map((it): LayerItem => (picked.has(it.id) ? ({ ...it, keep: false, force: true } as LayerItem) : it)),
+      base
+    );
+    stopAuto();
+    setSelection([]);
+    void runAuto(picked, true);
   };
 
   const commitSmooth = () => {
@@ -1290,11 +1461,17 @@ export default function InkOverlay({
     flexWrap: "nowrap",
   };
   const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
+  const selHasText = selIds.some((id) => itemsRef.current.some((it) => it.kind === "text" && it.id === id));
+  const selHasPen = selIds.some((id) => itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen" && it.id === id));
+
+  // Aviso "Convertido" com o botão Corrigir: uma pastilha pequena, sem abrir a barra de ferramentas inteira.
+  const doneChip = active && autoMsg === "Convertido." && lastConv.length > 0 && !editIds;
 
   // Modo automático: o desenho só captura a caneta (e só quando ela está perto); no modo clássico captura tudo.
   const capture = active && writing && (!auto || penNear);
   // Modo automático: a barra some sozinha enquanto você só digita (e volta quando a caneta se aproxima ou ao tocar no ✍).
-  const barVisible = !auto || barOn || convOpen || enhance || selIds.length > 0 || !!autoMsg || convBusy;
+  const barVisible =
+    !auto || barOn || convOpen || enhance || selIds.length > 0 || (!!autoMsg && autoMsg !== "Convertido.") || convBusy || !!editIds;
 
   if (!show) return null;
 
@@ -1351,6 +1528,31 @@ export default function InkOverlay({
           mixBlendMode: tool === "highlighter" ? "multiply" : "normal",
         }}
       />
+      {doneChip && (
+        <div
+          role="status"
+          style={{
+            position: "fixed",
+            right: 12,
+            bottom: `calc(var(--kb, 0px) + var(--dock-h, 0px) + ${barVisible ? 170 : 68}px + env(safe-area-inset-bottom, 0px))`,
+            zIndex: 61,
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            padding: "6px 8px 6px 12px",
+            borderRadius: 999,
+            border: "1px solid var(--line, #d5dbe3)",
+            background: "var(--card, #fff)",
+            boxShadow: "0 4px 16px rgba(0,0,0,.18)",
+            fontSize: 14,
+          }}
+        >
+          <span>Convertido ✓</span>
+          <button type="button" style={{ ...btn(true), height: 32, fontWeight: 700 }} onClick={() => openEdit(lastConv)}>
+            Corrigir
+          </button>
+        </div>
+      )}
       {active && !barVisible && (
         <button
           type="button"
@@ -1405,7 +1607,7 @@ export default function InkOverlay({
             WebkitOverflowScrolling: "touch",
           }}
         >
-          {autoMsg && (
+          {autoMsg && autoMsg !== "Convertido." && (
             <div
               role="status"
               style={{
@@ -1435,24 +1637,58 @@ export default function InkOverlay({
               )}
             </div>
           )}
+          {editIds && (
+            <div role="group" aria-label="Corrigir o texto convertido" style={{ display: "grid", gap: 6 }}>
+              <b style={{ fontSize: 13 }}>Corrigir o texto</b>
+              {editIds.map((id, i) => {
+                const t = itemsRef.current.find((it): it is TextItem => it.kind === "text" && it.id === id);
+                if (!t) return null;
+                return (
+                  <input
+                    key={id}
+                    type="text"
+                    value={t.text}
+                    autoFocus={i === 0}
+                    aria-label={`Texto da linha ${i + 1}`}
+                    onChange={(e) => editTextOf(id, e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") closeEdit();
+                    }}
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      height: 42,
+                      padding: "0 10px",
+                      borderRadius: 8,
+                      border: "1px solid var(--line, #d5dbe3)",
+                      fontSize: 17,
+                      fontFamily: t.font ?? undefined,
+                      userSelect: "text",
+                      WebkitUserSelect: "text",
+                    }}
+                  />
+                );
+              })}
+              <div style={row}>
+                <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={closeEdit}>
+                  Pronto
+                </button>
+              </div>
+              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>A letra à mão clarinha atrás do texto é só para você conferir. Apague o campo e toque em Pronto para remover a linha; ↶ desfaz.</p>
+            </div>
+          )}
           {convOpen && (
             <div role="group" aria-label="Converter escrita em texto" style={{ display: "grid", gap: 6 }}>
               {convText === null ? (
                 <>
                   <div style={row}>
-                    {CONV_FONTS.map((f, i) => (
-                      <button
-                        type="button"
-                        key={f.name}
-                        aria-label={`Fonte ${f.name}`}
-                        style={{ ...btn(convFont === i), fontSize: 15, fontFamily: f.v ?? undefined }}
-                        onClick={() => setConvFont(i)}
-                      >
-                        {f.name}
-                      </button>
-                    ))}
+                    <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={convertNow}>
+                      {selIds.length ? `Converter os ${selIds.length} selecionados` : "Converter a escrita"}
+                    </button>
+                    <button type="button" aria-label="Ajustes da conversão: fonte e pausa" style={btn(convSettings)} onClick={() => setConvSettings((v) => !v)}>
+                      {`⚙ ${CONV_FONTS[convFont].name}${autoOn ? ` · ${autoDelay} s` : ""}`}
+                    </button>
                   </div>
-                  <b style={{ fontSize: 13 }}>Enquanto eu escrevo</b>
                   <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, fontWeight: 600 }}>
                     <input
                       type="checkbox"
@@ -1467,45 +1703,51 @@ export default function InkOverlay({
                     />
                     Converter sozinha quando eu parar de escrever
                   </label>
-                  {autoOn && (
+                  {convSettings && (
                     <>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Pausa</span>
-                        <input
-                          type="range"
-                          min={2}
-                          max={10}
-                          step={1}
-                          value={autoDelay}
-                          aria-label="Tempo de pausa antes de converter"
-                          onChange={(e) => setAutoDelay(Number(e.target.value))}
-                          style={{ flex: 1, minWidth: 80 }}
-                        />
-                        <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
+                      <div style={row}>
+                        {CONV_FONTS.map((f, i) => (
+                          <button
+                            type="button"
+                            key={f.name}
+                            aria-label={`Fonte ${f.name}`}
+                            style={{ ...btn(convFont === i), fontSize: 15, fontFamily: f.v ?? undefined }}
+                            onClick={() => setConvFont(i)}
+                          >
+                            {f.name}
+                          </button>
+                        ))}
                       </div>
-                      <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                        Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Setas, traços soltos, linhas e círculos ficam como desenho e não viram texto; ↶ desfaz. Precisa de internet.
-                      </p>
+                      {autoOn && (
+                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Pausa</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={10}
+                            step={1}
+                            value={autoDelay}
+                            aria-label="Tempo de pausa antes de converter"
+                            onChange={(e) => setAutoDelay(Number(e.target.value))}
+                            style={{ flex: 1, minWidth: 80 }}
+                          />
+                          <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
+                        </div>
+                      )}
+                      <div style={row}>
+                        <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
+                          {convBusy
+                            ? "Reconhecendo…"
+                            : selIds.length
+                              ? `Enviar os ${selIds.length} selecionados para o texto da página`
+                              : "Enviar toda a escrita para o texto da página (editável)"}
+                        </button>
+                      </div>
                     </>
                   )}
-                  <b style={{ fontSize: 13 }}>Depois de escrever</b>
-                  <div style={row}>
-                    <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={convertNow}>
-                      {selIds.length ? `Converter agora os ${selIds.length} selecionados` : "Converter toda a escrita agora"}
-                    </button>
-                  </div>
-                  <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
-                    Escreva tudo o que quiser e converta no fim, no mesmo lugar. Use o ⬚ Laço para escolher só um trecho.
+                  <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
+                    A letra vira texto no mesmo lugar e na mesma cor. Depois de converter, toque em Corrigir (ou toque no texto com o ⬚ Laço) para ajustar qualquer palavra. Para escolher só um trecho, use o ⬚ Laço. Precisa de internet.
                   </p>
-                  <div style={row}>
-                    <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
-                      {convBusy
-                        ? "Reconhecendo…"
-                        : selIds.length
-                          ? `Passar para o texto da página: os ${selIds.length} selecionados`
-                          : "Passar toda a escrita para o texto da página (editável)"}
-                    </button>
-                  </div>
                   {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
                 </>
               ) : (
@@ -1598,8 +1840,23 @@ export default function InkOverlay({
               </p>
             </div>
           )}
-          {tool === "lasso" && selIds.length > 0 && (
+          {tool === "lasso" && selIds.length > 0 && !editIds && (
             <div role="toolbar" aria-label="Ações da seleção" style={row}>
+              {selHasText && (
+                <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={() => openEdit(selIds)}>
+                  ✏ Corrigir texto
+                </button>
+              )}
+              {selHasPen && (
+                <button type="button" style={btn()} onClick={keepAsDrawing}>
+                  Manter como desenho
+                </button>
+              )}
+              {selHasPen && (
+                <button type="button" style={btn()} onClick={forceText}>
+                  Converter como texto
+                </button>
+              )}
               <button type="button" style={btn()} onClick={deleteSelection}>Excluir seleção</button>
               <button type="button" style={btn()} onClick={duplicateSelection}>Duplicar</button>
               <button type="button" style={btn()} onClick={recolorSelection}>Pintar com a cor atual</button>
@@ -1635,7 +1892,7 @@ export default function InkOverlay({
             <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
             <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
-            <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+            <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos, corrigir texto convertido e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
             <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
             <button
               type="button"
@@ -1657,6 +1914,7 @@ export default function InkOverlay({
               aria-label={auto ? "Pausar a caneta e voltar só ao texto" : "Concluir e voltar a editar o texto"}
               style={{ ...btn(), fontWeight: 700 }}
               onClick={() => {
+                if (editIds) closeEdit();
                 flushPush();
                 onClose();
               }}
