@@ -1360,7 +1360,7 @@ export default function InkOverlay({
     const picked = new Set(Array.from(selRef.current).filter((id) => base.some((it) => it.id === id && it.kind === "ink" && it.tool === "pen")));
     if (!picked.size) return;
     commit(
-      base.map((it): LayerItem => (picked.has(it.id) ? ({ ...it, keep: false, force: true } as LayerItem) : it)),
+      base.map((it): LayerItem => (picked.has(it.id) ? ({ ...it, keep: false, force: true } as unknown as LayerItem) : it)),
       base
     );
     stopAuto();
