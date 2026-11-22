@@ -4,6 +4,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { loadPdfjs } from "@/lib/pdfjs";
 import PdfPageView from "./PdfPageView";
+import { PDF_FONTS } from "./convert";
+import { loadHandwritingFonts } from "../editor/ink-text";
 import { usePdfAnnotations } from "./usePdfAnnotations";
 import {
   EMPTY,
@@ -13,6 +15,8 @@ import {
   PEN_WIDTHS,
   TOOLS,
   opAddNote,
+  opConvert,
+  opPatchTexts,
   opRemoveNote,
   uid,
   type Note,
@@ -111,6 +115,17 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
 
   // Exportar uma cópia do PDF com as anotações gravadas (baixar ou compartilhar).
   const [exporting, setExporting] = useState(false);
+
+  // Converter escrita à mão em texto (mesmo reconhecedor e mesmas fontes do caderno).
+  const [convFont, setConvFont] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem("mednotes:pdf-conv-font"));
+      return Number.isInteger(v) && v >= 0 && v < PDF_FONTS.length ? v : 0;
+    } catch {
+      return 0;
+    }
+  });
+  const [converting, setConverting] = useState(false);
   const [canShare, setCanShare] = useState(false);
 
   const rootRef = useRef<HTMLDivElement>(null);
@@ -686,6 +701,48 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
     closeNote();
     setPasteMode(false);
     setTool(t);
+    if (t === "text") loadHandwritingFonts(() => undefined);
+  }
+
+  // Converte toda a letra à mão (caneta) da página atual em texto. Desfazer (↶) devolve a letra à mão.
+  async function convertPage() {
+    if (converting) return;
+    const pg = clamp(currentRef.current, 1, Math.max(1, numPages));
+    setConverting(true);
+    window.clearTimeout(toastTimer.current);
+    setToast("Convertendo a escrita da página " + pg + "…");
+    try {
+      const { convertPageInk } = await import("./convert");
+      const ratio = ratios[pg] ?? defaultRatio;
+      const r = await convertPageInk(get(pg), ratio, PDF_FONTS[convFont].v);
+      if (!r.added.length) {
+        flash("Nada para converter nesta página (só a caneta vira texto; setas, traços e círculos ficam como estão).");
+        return;
+      }
+      const cur = get(pg);
+      const ids = new Set(r.removed.map((i) => i.id));
+      apply(pg, { ...cur, items: cur.items.filter((i) => !ids.has(i.id)), texts: [...(cur.texts ?? []), ...r.added] });
+      record(opConvert(pg, r.removed, r.added));
+      flash(`${r.added.length} linha(s) convertida(s)${r.failed ? `; ${r.failed} não deu para ler` : ""}. Toque no texto para corrigir.`);
+    } catch (e) {
+      flash(e instanceof Error && e.message ? e.message : "Não consegui converter agora.");
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  // Muda a fonte ou o tamanho dos textos convertidos da página atual.
+  function restyleTexts(patch: (t: { size: number; font: string | null }) => { size?: number; font?: string | null }) {
+    const pg = clamp(currentRef.current, 1, Math.max(1, numPages));
+    const a = get(pg);
+    const before = a.texts ?? [];
+    if (!before.length) {
+      flash("Não há texto convertido nesta página.");
+      return;
+    }
+    const after = before.map((t) => ({ ...t, ...patch(t) }));
+    apply(pg, { ...a, texts: after });
+    record(opPatchTexts(pg, before, after));
   }
 
   // Copia todo o texto da página atual (atalho para quando não quer selecionar pedaço por pedaço).
@@ -787,6 +844,7 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
   else if (ann.status === "saved") statusText = "Anotações salvas";
   if (pasteMode) statusText = "Toque na página onde quer colar o comentário";
   else if (tool === "clip") statusText = "Arraste sobre a imagem que quer copiar";
+  else if (tool === "text") statusText = "Escreva com a caneta e toque em Converter. Toque num texto para corrigir";
   else if (tool === "select") statusText = "Selecione o texto (segure e arraste) e use Copiar";
   if (toast) statusText = toast;
 
@@ -936,6 +994,38 @@ export default function PdfNotebook({ url, name, onRemove }: { url: string; name
             <span className="pdfnb-sep" />
             <button type="button" className="pdfnb-btn" aria-label="Desfazer" disabled={!ann.canUndo} onClick={() => reveal(undo())}>↶</button>
             <button type="button" className="pdfnb-btn" aria-label="Refazer" disabled={!ann.canRedo} onClick={() => reveal(redo())}>↷</button>
+            {tool === "text" && (
+              <>
+                <span className="pdfnb-sep" />
+                {PDF_FONTS.map((f, i) => (
+                  <button
+                    type="button"
+                    key={f.name}
+                    className={i === convFont ? "pdfnb-btn on" : "pdfnb-btn"}
+                    aria-pressed={i === convFont}
+                    style={f.v ? { fontFamily: f.v } : undefined}
+                    title="Fonte do texto convertido (também troca os textos já convertidos desta página)"
+                    onClick={() => {
+                      setConvFont(i);
+                      try {
+                        localStorage.setItem("mednotes:pdf-conv-font", String(i));
+                      } catch {
+                        /* ignora */
+                      }
+                      loadHandwritingFonts(() => undefined);
+                      restyleTexts(() => ({ font: f.v }));
+                    }}
+                  >
+                    {f.name}
+                  </button>
+                ))}
+                <button type="button" className="pdfnb-btn" aria-label="Diminuir texto convertido" onClick={() => restyleTexts((t) => ({ size: t.size * 0.9 }))}>A−</button>
+                <button type="button" className="pdfnb-btn" aria-label="Aumentar texto convertido" onClick={() => restyleTexts((t) => ({ size: t.size * 1.1 }))}>A+</button>
+                <button type="button" className="pdfnb-btn on" disabled={!editable || converting} onClick={() => void convertPage()}>
+                  {converting ? "Convertendo…" : "Converter escrita desta página"}
+                </button>
+              </>
+            )}
             {noteClip && editable && (
               <button
                 type="button"
