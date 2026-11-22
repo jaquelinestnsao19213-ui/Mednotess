@@ -3,14 +3,17 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import { loadPdfjs } from "@/lib/pdfjs";
-import { drawItem, drawItems, hitItem } from "./draw";
+import { drawItem, drawItems, drawTexts, hitItem, hitPdfText, textBox } from "./draw";
+import { loadHandwritingFonts } from "../editor/ink-text";
 import NoteCard from "./NoteCard";
 import ReadOnlyNote from "./ReadOnlyNote";
 import {
   opAddItem,
   opAddNote,
   opMoveNote,
+  opPatchTexts,
   opRemoveItems,
+  opRemoveMixed,
   uid,
   type EllipseItem,
   type InkItem,
@@ -19,6 +22,7 @@ import {
   type NoteClip,
   type Op,
   type PageAnn,
+  type PdfText,
   type Tool,
 } from "./types";
 
@@ -50,7 +54,7 @@ export type PageProps = {
 type Session =
   | { kind: "ink"; pid: number; tool: "pen" | "highlighter"; color: string; width: number; pts: number[] }
   | { kind: "ellipse"; pid: number; color: string; width: number; x0: number; y0: number; x1: number; y1: number }
-  | { kind: "erase"; pid: number; cur: PageAnn; removed: Item[] };
+  | { kind: "erase"; pid: number; cur: PageAnn; removed: Item[]; removedTexts: PdfText[] };
 
 type Crop = { x0: number; y0: number; x1: number; y1: number };
 type PinDrag = { id: string; pid: number; sx: number; sy: number; ox: number; oy: number; x0: number; y0: number; moved: boolean };
@@ -92,6 +96,11 @@ function PdfPageView(p: PageProps) {
   const pinMoved = useRef(false);
 
   const [textW, setTextW] = useState(0);
+  const [fontTick, setFontTick] = useState(0);
+  const hasFontText = (p.ann.texts ?? []).some((t) => t.font);
+  useEffect(() => {
+    if (hasFontText) loadHandwritingFonts(() => setFontTick((v) => v + 1));
+  }, [hasFontText]);
   const [crop, setCrop] = useState<Crop | null>(null);
   const [cropDragging, setCropDragging] = useState(false);
   const [cropMsg, setCropMsg] = useState("");
@@ -206,10 +215,13 @@ function PdfPageView(p: PageProps) {
       live.height = H;
     }
     const ctx = base.getContext("2d");
-    if (ctx) drawItems(ctx, p.ann.items, W, H, "rest");
+    if (ctx) {
+      drawItems(ctx, p.ann.items, W, H, "rest");
+      if (p.ann.texts?.length) drawTexts(ctx, p.ann.texts, W, H);
+    }
     const mctx = mark.getContext("2d");
     if (mctx) drawItems(mctx, p.ann.items, W, H, "marker");
-  }, [active, width, height, p.ann.items]);
+  }, [active, width, height, p.ann.items, p.ann.texts, fontTick]);
 
   function paintLive() {
     const live = liveCanvas.current;
@@ -257,17 +269,20 @@ function PdfPageView(p: PageProps) {
       const W = width;
       const H = height;
       const hit = s.cur.items.filter((it) => hitItem(it, x, y, W, H, 10));
-      if (hit.length > 0) {
+      const hitT = (s.cur.texts ?? []).filter((t) => hitPdfText(t, x, y, W, H, 10));
+      if (hit.length > 0 || hitT.length > 0) {
         const ids = new Set(hit.map((h) => h.id));
+        const tids = new Set(hitT.map((h) => h.id));
         s.removed.push(...hit);
-        s.cur = { ...s.cur, items: s.cur.items.filter((it) => !ids.has(it.id)) };
+        s.removedTexts.push(...hitT);
+        s.cur = { ...s.cur, items: s.cur.items.filter((it) => !ids.has(it.id)), texts: (s.cur.texts ?? []).filter((t) => !tids.has(t.id)) };
         p.onApply(n, s.cur);
       }
     }
   }
 
   function onDown(e: React.PointerEvent<HTMLCanvasElement>) {
-    if (!p.editable || p.tool === "hand" || p.tool === "note" || p.tool === "select" || p.tool === "clip") return;
+    if (!p.editable || p.tool === "hand" || p.tool === "note" || p.tool === "select" || p.tool === "clip" || p.tool === "text") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "touch" && !p.fingerDraw) return;
     if (!p.claim(e.pointerId)) return;
@@ -280,7 +295,7 @@ function PdfPageView(p: PageProps) {
     } else if (p.tool === "circle") {
       s = { kind: "ellipse", pid: e.pointerId, color: p.color, width: p.size, x0: x, y0: y, x1: x, y1: y };
     } else {
-      s = { kind: "erase", pid: e.pointerId, cur: annRef.current, removed: [] };
+      s = { kind: "erase", pid: e.pointerId, cur: annRef.current, removed: [], removedTexts: [] };
       move(s, e.clientX, e.clientY);
     }
     session.current = s;
@@ -307,7 +322,7 @@ function PdfPageView(p: PageProps) {
     session.current = null;
     const before = annRef.current;
     if (s.kind === "erase") {
-      if (s.removed.length > 0) p.onRecord(opRemoveItems(n, s.removed));
+      if (s.removed.length > 0 || s.removedTexts.length > 0) p.onRecord(opRemoveMixed(n, s.removed, s.removedTexts));
     } else if (!cancelled) {
       let item: Item | null = null;
       if (s.kind === "ink") {
@@ -334,6 +349,27 @@ function PdfPageView(p: PageProps) {
       }
     }
     paintLive();
+  }
+
+  // Toque no texto convertido (ferramenta "Converter escrita"): corrige a palavra ou apaga.
+  function editText(t: PdfText) {
+    if (!p.editable) return;
+    const v = window.prompt("Corrigir o texto (deixe vazio para apagar):", t.text);
+    if (v === null) return;
+    const a = annRef.current;
+    if (v.trim() === "") {
+      const next = { ...a, texts: (a.texts ?? []).filter((x) => x.id !== t.id) };
+      annRef.current = next;
+      p.onApply(n, next);
+      p.onRecord(opRemoveMixed(n, [], [t]));
+      return;
+    }
+    if (v === t.text) return;
+    const after = { ...t, text: v };
+    const next = { ...a, texts: (a.texts ?? []).map((x) => (x.id === t.id ? after : x)) };
+    annRef.current = next;
+    p.onApply(n, next);
+    p.onRecord(opPatchTexts(n, [t], [after]));
   }
 
   function patchNote(id: string, patch: Partial<Note>) {
@@ -582,6 +618,23 @@ function PdfPageView(p: PageProps) {
           {cropMsg && <span className="pdfpage-clipmsg">{cropMsg}</span>}
         </div>
       )}
+
+      {active && p.tool === "text" && p.editable &&
+        (p.ann.texts ?? []).map((t) => {
+          const [l, tp, r, b] = textBox(t, width, height);
+          return (
+            <button
+              key={t.id}
+              type="button"
+              data-nopan=""
+              aria-label={`Corrigir texto: ${t.text}`}
+              title="Toque para corrigir ou apagar"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => editText(t)}
+              style={{ position: "absolute", left: l - 3, top: tp - 3, width: r - l + 6, height: b - tp + 6, background: "transparent", border: "1px dashed #0f766e", borderRadius: 4, padding: 0, cursor: "pointer", zIndex: 5 }}
+            />
+          );
+        })}
 
       {p.ann.notes.map((note) => (
         <div key={note.id} data-nopan="" onPointerDown={(e) => e.stopPropagation()}>
