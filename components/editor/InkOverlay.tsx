@@ -6,6 +6,7 @@ import { hitItem, isMarker } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk, shapeIds, type Anchor } from "./ink-recognize";
+import { recognizeShape } from "./ink-shapes";
 import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
@@ -54,6 +55,14 @@ const TAP_MOVE_PX = 6; // quanto a caneta pode se mexer e ainda ser um toque
 const DOUBLE_TAP_MS = 400; // dois toques da caneta nesse intervalo e perto um do outro = colocar o cursor ali
 const DOUBLE_TAP_PX = 30;
 const SEL_TAP_PX = 6; // com o laço, tocar num texto sem arrastar mais que isso abre a correção do texto
+const HOLD_MS = 550; // caneta parada no fim do traço por esse tempo: a forma é corrigida (reta, seta, retângulo)
+const HOLD_JITTER_PX = 5; // tremor da mão que ainda conta como "parada"
+const SNAP_CANCEL_PX = 10; // se a caneta se mexe mais que isso depois da forma aparecer, volta ao traço livre
+
+// Traço que já é uma forma corrigida automaticamente (reta, seta, retângulo): nunca vira texto.
+function isShape(it: unknown): boolean {
+  return !!(it as { shape?: boolean } | null)?.shape;
+}
 
 // Coloca o cursor do texto no ponto da tela (x, y). A camada de escrita fica por cima da página,
 // então ela é "desligada" por um instante para o navegador achar o texto que está por baixo.
@@ -127,6 +136,15 @@ export default function InkOverlay({
   const [enhance, setEnhance] = useState(false);
   const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
+
+  // Formas automáticas: segurar a caneta parada no fim do traço endireita retas, setas e retângulos.
+  const [shapesOn, setShapesOn] = useState(true);
+  const shapesOnRef = useRef(true);
+  shapesOnRef.current = shapesOn;
+  const holdTimerRef = useRef(0);
+  const holdAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  // Forma já reconhecida (enquanto a caneta ainda está na tela): pontos prontos e onde a caneta estava.
+  const snapRef = useRef<{ pts: number[]; cx: number; cy: number } | null>(null);
 
   // Caneta automática: "penNear" = a caneta está sobre a página (o desenho captura só a caneta);
   // "barOn" = a barra de ferramentas está visível (some sozinha quando você só digita).
@@ -211,17 +229,20 @@ export default function InkOverlay({
 
   const show = active || layer.items.length > 0;
 
-  // Preferências de conversão (fonte e pausa): lembradas entre cadernos e sessões.
+  // Preferências de conversão (fonte e pausa) e das formas automáticas: lembradas entre cadernos e sessões.
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(PREFS_KEY);
       if (raw) {
-        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown } | null;
+        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown; shapesOn?: unknown } | null;
         if (p && typeof p.convFont === "number" && Number.isInteger(p.convFont) && p.convFont >= 0 && p.convFont < CONV_FONTS.length) {
           setConvFont(p.convFont);
         }
         if (p && typeof p.autoDelay === "number" && p.autoDelay >= 2 && p.autoDelay <= 10) {
           setAutoDelay(Math.round(p.autoDelay));
+        }
+        if (p && typeof p.shapesOn === "boolean") {
+          setShapesOn(p.shapesOn);
         }
       }
     } catch {
@@ -233,11 +254,11 @@ export default function InkOverlay({
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
     try {
-      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay }));
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay, shapesOn }));
     } catch {
       // armazenamento indisponível: a preferência vale só nesta sessão
     }
-  }, [convFont, autoDelay]);
+  }, [convFont, autoDelay, shapesOn]);
 
   // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
   // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
@@ -425,6 +446,7 @@ export default function InkOverlay({
       window.clearTimeout(penNearTimerRef.current);
       window.clearTimeout(barTimerRef.current);
       window.clearTimeout(ghostTimerRef.current);
+      window.clearTimeout(holdTimerRef.current);
     },
     []
   );
@@ -502,6 +524,47 @@ export default function InkOverlay({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
 
+  // Formas automáticas. A cada movimento da caneta a contagem recomeça; se ela ficar parada no fim do traço
+  // por HOLD_MS, o traço é comparado com reta, seta e retângulo e, se parecer com um deles, a forma perfeita
+  // aparece no lugar (ainda com a caneta na tela). Ao levantar a caneta, a forma fica; se a caneta se mexer
+  // de novo antes disso, a forma some e o traço continua livre.
+  const clearHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = 0;
+    holdAnchorRef.current = null;
+  };
+
+  const snapNow = () => {
+    const d = draftRef.current;
+    const anchor = holdAnchorRef.current;
+    const w = sizeRef.current.w;
+    if (!d || !anchor || snapRef.current || !w || !shapesOnRef.current) return;
+    const shape = recognizeShape(d.pts, w);
+    if (!shape) return;
+    snapRef.current = { pts: shape.pts, cx: anchor.x, cy: anchor.y };
+    clearLive();
+    const canvas = liveRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const dpr = dprRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawInkItem(ctx, { ...d, pts: shape.pts, pr: undefined, shape: true } as unknown as Item, w);
+    try {
+      if (typeof navigator !== "undefined" && "vibrate" in navigator) navigator.vibrate(12);
+    } catch {
+      // aparelho sem vibração: a forma aparece do mesmo jeito
+    }
+  };
+
+  const armHold = (cx: number, cy: number) => {
+    window.clearTimeout(holdTimerRef.current);
+    holdAnchorRef.current = { x: cx, y: cy };
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = 0;
+      snapNow();
+    }, HOLD_MS);
+  };
+
   // Ao levantar a caneta: o traço pronto é desenhado direto na camada principal (sem redesenhar a página).
   const drawFinished = (it: Item) => {
     const canvas = isMarker(it) && markRef.current ? markRef.current : canvasRef.current;
@@ -528,6 +591,8 @@ export default function InkOverlay({
     }
     lassoRef.current = null;
     draftRef.current = null;
+    clearHold();
+    snapRef.current = null;
     pointerRef.current = null;
     clearLive();
     schedule();
@@ -568,6 +633,8 @@ export default function InkOverlay({
       setSelIds([]);
       lassoRef.current = null;
       draftRef.current = null;
+      clearHold();
+      snapRef.current = null;
       touchesRef.current.clear();
       pinchRef.current = null;
       panRef.current = null;
@@ -825,7 +892,7 @@ export default function InkOverlay({
     }
     const ids = only ? new Set(only) : new Set(pendingRef.current);
     if (!only) pendingRef.current = new Set();
-    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && ids.has(it.id));
+    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !isShape(it) && ids.has(it.id));
     const w = sizeRef.current.w;
     if (!src.length) return;
     if (!w) {
@@ -928,7 +995,7 @@ export default function InkOverlay({
 
   // Conversão depois de escrever: tudo de uma vez (ou só o que está selecionado com o laço), no mesmo lugar.
   const convertNow = () => {
-    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen");
+    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !isShape(it));
     const picked = selRef.current;
     const src = picked.size ? pens.filter((it) => picked.has(it.id)) : pens;
     if (!src.length) {
@@ -1043,6 +1110,8 @@ export default function InkOverlay({
       pts: [x, y],
       ...(pr0 ? { pr: pr0 } : {}),
     };
+    snapRef.current = null;
+    armHold(e.clientX, e.clientY);
     scheduleLive();
   };
 
@@ -1079,6 +1148,18 @@ export default function InkOverlay({
     }
     if (e.pointerId !== pointerRef.current) return;
     e.preventDefault();
+    // Formas automáticas: a caneta se mexeu, então a contagem de "parada" recomeça.
+    if (draftRef.current) {
+      const snap = snapRef.current;
+      if (snap) {
+        // Forma já na tela: um tremor pequeno é ignorado; se a caneta se mexer de verdade, a forma some e o traço continua livre.
+        if (Math.hypot(e.clientX - snap.cx, e.clientY - snap.cy) < SNAP_CANCEL_PX) return;
+        snapRef.current = null;
+        clearLive();
+      }
+      const a = holdAnchorRef.current;
+      if (!a || Math.hypot(e.clientX - a.x, e.clientY - a.y) > HOLD_JITTER_PX) armHold(e.clientX, e.clientY);
+    }
     const ne = e.nativeEvent;
     const list = typeof ne.getCoalescedEvents === "function" ? ne.getCoalescedEvents() : [];
     const evs = list.length ? list : [ne];
@@ -1188,14 +1269,20 @@ export default function InkOverlay({
     }
     const d = draftRef.current;
     draftRef.current = null;
+    // Forma corrigida (reta, seta, retângulo) que apareceu enquanto a caneta estava parada: é ela que fica na página.
+    const snap = snapRef.current;
+    snapRef.current = null;
+    clearHold();
     if (d) {
+      // A forma vai marcada como desenho ("keep"), para a conversão em texto nunca mexer nela.
+      const fin = snap ? ({ ...d, pts: snap.pts, pr: undefined, shape: true, keep: true } as unknown as PenInk) : d;
       // Toque rápido da caneta, sem arrastar: sozinho é só um ponto (como um ponto final);
       // dois toques seguidos, perto um do outro, colocam o cursor do texto ali (o ponto do primeiro toque some).
       const now = performance.now();
       const tap = tapRef.current;
       tapRef.current = null;
       const isTap =
-        auto && !!tap && d.tool === "pen" && now - tap.t < TAP_MS && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < TAP_MOVE_PX;
+        auto && !snap && !!tap && d.tool === "pen" && now - tap.t < TAP_MS && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < TAP_MOVE_PX;
       const prev = lastTapRef.current;
       if (isTap && prev && now - prev.t < DOUBLE_TAP_MS && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < DOUBLE_TAP_PX) {
         lastTapRef.current = null;
@@ -1211,11 +1298,11 @@ export default function InkOverlay({
         placeCaretAt(canvasRef.current, e.clientX, e.clientY);
         return;
       }
-      commit([...itemsRef.current, d], itemsRef.current);
-      drawFinished(d);
+      commit([...itemsRef.current, fin], itemsRef.current);
+      drawFinished(fin);
       clearLive();
       lastTapRef.current = isTap ? { id: d.id, t: now, x: e.clientX, y: e.clientY } : null;
-      if (autoOnRef.current && d.tool === "pen") {
+      if (autoOnRef.current && d.tool === "pen" && !snap) {
         // Se este traço começou outra linha, a linha anterior já está pronta e é convertida agora.
         // Se continua na mesma linha, espera a pausa para não converter no meio da escrita.
         const before = pendingRef.current;
@@ -1267,6 +1354,8 @@ export default function InkOverlay({
     eraseBaseRef.current = null;
     // Descarta o traço incompleto.
     draftRef.current = null;
+    clearHold();
+    snapRef.current = null;
     lassoRef.current = null;
     tapRef.current = null;
     if (e.pointerType === "pen") {
@@ -1394,7 +1483,7 @@ export default function InkOverlay({
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
   const convert = async () => {
     if (convBusy) return;
-    const ink = itemsRef.current.filter(isInkLike);
+    const ink = itemsRef.current.filter(isInkLike).filter((it) => !isShape(it));
     const src = selRef.current.size ? ink.filter((it) => selRef.current.has(it.id)) : ink;
     setConvBusy(true);
     setConvErr(null);
@@ -1893,6 +1982,18 @@ export default function InkOverlay({
             <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
             <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
             <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos, corrigir texto convertido e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+            <button
+              type="button"
+              aria-label={
+                shapesOn
+                  ? "Formas automáticas ligadas: segure a caneta parada no fim do traço para endireitar retas, setas e retângulos. Toque para desligar"
+                  : "Ligar as formas automáticas: segure a caneta parada no fim do traço para endireitar retas, setas e retângulos"
+              }
+              style={btn(shapesOn)}
+              onClick={() => setShapesOn((v) => !v)}
+            >
+              ▭
+            </button>
             <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
             <button
               type="button"
