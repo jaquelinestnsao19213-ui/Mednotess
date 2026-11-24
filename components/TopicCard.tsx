@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from "
 import Link from "next/link";
 import { TYPE_LABEL } from "@/lib/page-tree";
 import type { DropZone } from "@/lib/topic-tree";
+import TopicSharePanel from "@/components/TopicSharePanel";
 
 export type PageItem = { id: string; title: string; icon: string | null; type: string; path: string };
 
@@ -98,6 +99,7 @@ export default function TopicCard(p: Props) {
             <button type="button" className="secondary small" onClick={p.onNewPage}>＋ Nova página</button>
             <button type="button" className="secondary small" onClick={p.onImport}>＋ Importar página</button>
           </div>
+          {(p.pages.length > 0 || p.children) && <TopicSharePanel topicId={p.id} name={p.name} />}
           {p.children && <ul className="tc-subs">{p.children}</ul>}
         </div>
       )}

@@ -10,7 +10,8 @@ import "../../shared-tree.css";
 const SharedPageView = dynamic(() => import("@/components/SharedPageView"), { ssr: false });
 
 type TreeRow = { id: string; parent_id: string | null; type: string; title: string; icon: string | null; position: number };
-type Tree = { root: string; pages: TreeRow[] };
+// root: a página publicada (link de página). Num link de assunto não há uma página só no topo: root vem vazio e title traz o nome do assunto.
+type Tree = { root: string | null; title?: string | null; pages: TreeRow[] };
 
 const TOP = "__top__";
 
@@ -62,7 +63,7 @@ function NavTree({ parentKey, kids, selected, expanded, onToggle, onPick }: NavP
 }
 
 // Link publicado (somente leitura): abre pelo código do link, sem precisar de conta.
-// Mostra a página publicada e tudo que está dentro dela, com a lista de cadernos para navegar.
+// Mostra a página (ou o assunto) publicada e tudo que está dentro dela, com a lista de cadernos para navegar.
 export default function SharedRoute() {
   const { token } = useParams<{ token: string }>();
   const [state, setState] = useState<"loading" | "ok" | "missing" | "error">("loading");
@@ -86,8 +87,10 @@ export default function SharedRoute() {
         if (!data || !Array.isArray(data.pages) || data.pages.length === 0) return setState("missing");
         setTree(data);
         const wanted = window.location.hash.slice(1);
-        setSelected(data.pages.some((r) => r.id === wanted) ? wanted : data.root);
-        setExpanded(new Set([data.root]));
+        // Link de assunto: abre na primeira página da lista.
+        const first = data.pages.filter((r) => r.parent_id == null).sort((a, b) => a.position - b.position)[0]?.id ?? data.pages[0].id;
+        setSelected(data.pages.some((r) => r.id === wanted) ? wanted : data.root ?? first);
+        setExpanded(new Set(data.root ? [data.root] : []));
         setState("ok");
         return;
       }
@@ -206,6 +209,7 @@ export default function SharedRoute() {
     <div className={multi ? "shared-shell" : "shared-shell single"}>
       {multi && (
         <aside className={navOpen ? "shared-nav open" : "shared-nav"} aria-label="Cadernos e páginas">
+          {tree.title && <p className="muted small" style={{ margin: "0 0 8px", fontWeight: 600 }}>📁 {tree.title}</p>}
           <NavTree parentKey={TOP} kids={kids} selected={selected} expanded={expanded} onToggle={toggle} onPick={go} />
         </aside>
       )}
