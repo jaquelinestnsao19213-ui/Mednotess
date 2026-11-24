@@ -5,6 +5,7 @@ import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
 import { drawItem, hitItem } from "../pdf/draw";
 import { smoothItem, smoothItemCached } from "./ink-smooth";
+import { snapStroke } from "./ink-shapes";
 
 type InkTool = "pen" | "highlighter" | "eraser" | "lasso";
 type Paper = "dots" | "grid" | "ruled" | "blank";
@@ -133,6 +134,11 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
   const eraseBaseRef = useRef<Item[] | null>(null);
   const penSeenRef = useRef(false);
   const rafRef = useRef(0);
+  const holdTimerRef = useRef(0);
+  const holdAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const snapRef = useRef<Item | null>(null); // forma reconhecida enquanto a caneta está parada
+  const widthRef = useRef(0);
+  widthRef.current = width;
 
   // Mudanças vindas de fora (desfazer do editor, outra aba) atualizam o desenho.
   const attrItems = node.attrs.items;
@@ -173,7 +179,8 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
     ctx.clearRect(0, 0, width, h);
     // A suavização só muda como o traço é desenhado; os pontos originais continuam guardados.
     for (const it of itemsRef.current) drawItem(ctx, smoothItemCached(it, smooth), width, width);
-    if (draftRef.current) drawItem(ctx, smoothItem(draftRef.current, smooth), width, width);
+    if (snapRef.current) drawItem(ctx, snapRef.current, width, width);
+    else if (draftRef.current) drawItem(ctx, smoothItem(draftRef.current, smooth), width, width);
 
     const lasso = lassoRef.current;
     if (lasso && lasso.length >= 4) {
@@ -209,7 +216,13 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
     paint();
   }, [paint, attrItems]);
 
-  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(rafRef.current);
+      window.clearTimeout(holdTimerRef.current);
+    },
+    []
+  );
 
   const schedule = () => {
     if (rafRef.current) return;
@@ -217,6 +230,31 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
       rafRef.current = 0;
       paint();
     });
+  };
+
+  const clearHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = 0;
+    holdAnchorRef.current = null;
+  };
+
+  // Caneta parada no fim do traço: se parece uma forma, mostra a versão reta; ao levantar, ela é guardada.
+  const armHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = 0;
+      const d = draftRef.current;
+      if (!d || d.tool !== "pen" || !widthRef.current) return;
+      const item = snapStroke(d, widthRef.current);
+      if (!item) return;
+      snapRef.current = item;
+      schedule();
+      try {
+        navigator.vibrate?.(8);
+      } catch {
+        // sem vibração neste aparelho
+      }
+    }, 450);
   };
 
   const setSelection = (ids: string[]) => {
@@ -318,6 +356,14 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
         const lx = p[p.length - 2];
         const ly = p[p.length - 1];
         if (Math.hypot(x - lx, y - ly) * width >= 0.6) p.push(x, y);
+        if (draftRef.current.tool === "pen") {
+          const an = holdAnchorRef.current;
+          if (!an || Math.hypot(x - an.x, y - an.y) * width > (snapRef.current ? 6 : 4)) {
+            snapRef.current = null; // voltou a mexer: o traço continua livre
+            holdAnchorRef.current = { x, y };
+            armHold();
+          }
+        }
         // Chegou perto do fim da folha: o bloco cresce sozinho.
         if (y > ratioRef.current - 0.08 && ratioRef.current < 8) {
           ratioRef.current = +(ratioRef.current + 0.4).toFixed(2);
@@ -354,7 +400,10 @@ export default function InkBlockView({ node, updateAttributes, deleteNode, selec
     }
     const d = draftRef.current;
     draftRef.current = null;
-    if (d) commit([...itemsRef.current, d], itemsRef.current);
+    const snapped = snapRef.current;
+    snapRef.current = null;
+    clearHold();
+    if (d) commit([...itemsRef.current, snapped ?? d], itemsRef.current);
   };
 
   const undo = () => {
