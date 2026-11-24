@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { INK_COLORS, MARK_COLORS, MARK_WIDTHS, PEN_WIDTHS, uid, type InkItem, type Item } from "../pdf/types";
 import { hitItem, isMarker } from "../pdf/draw";
 import { smoothItemCached } from "./ink-smooth";
 import { boundsOf, moveItem, pickedByLasso } from "./ink-geometry";
 import { recognizeInk, shapeIds, type Anchor } from "./ink-recognize";
+import { snapStroke } from "./ink-shapes";
+import { highlightLines } from "./ink-snap-text";
 import { findMate, joinText } from "./ink-merge";
 import { tidyItems } from "./ink-tidy";
 import { drawInkItem, scaleLayerItem, strokePressure, type PenInk } from "./ink-pressure";
@@ -42,7 +45,9 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
 
 const FADE_MS = 320; // duração da transição da letra à mão para o texto
 const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
+const ZOOM_MAX = 4; // zoom máximo da página com dois dedos
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
+const HOLD_MS = 450; // segurar a caneta parada no fim do traço endireita a forma
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
 const BAR_IDLE_MS = 10000; // modo automático: a barra de ferramentas some depois desse tempo sem a caneta
@@ -121,6 +126,8 @@ export default function InkOverlay({
   const [selIds, setSelIds] = useState<string[]>([]);
   const [smooth, setSmooth] = useState(layer.smooth);
   const [enhance, setEnhance] = useState(false);
+  const [shapesOn, setShapesOn] = useState(true); // formas automáticas (segurar a caneta no fim do traço)
+  const [alignMark, setAlignMark] = useState(true); // marca-texto alinhado às linhas de texto
   const [tidyAmt, setTidyAmt] = useState(0.6);
   const [, setTick] = useState(0);
 
@@ -157,6 +164,13 @@ export default function InkOverlay({
   convFontRef.current = convFont;
   const sizeRef = useRef(size);
   sizeRef.current = size;
+  const shapesOnRef = useRef(true);
+  shapesOnRef.current = shapesOn;
+  const alignMarkRef = useRef(true);
+  alignMarkRef.current = alignMark;
+  const holdTimerRef = useRef(0);
+  const holdAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const snapRef = useRef<Item | null>(null); // forma reconhecida enquanto a caneta está parada
   const pendingRef = useRef<Set<string>>(new Set());
   const autoTimerRef = useRef(0);
   const autoBusyRef = useRef(false);
@@ -180,6 +194,11 @@ export default function InkOverlay({
   const touchesRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchRef = useRef<{ d0: number; base: LayerItem[]; cx: number; cy: number } | null>(null);
   const panRef = useRef<{ x: number; y: number } | null>(null);
+  // Zoom da página com dois dedos (pinça) sem sair do modo de escrita: a página (texto + escrita) é ampliada por transform.
+  const zoomRef = useRef(1);
+  const hostRef = useRef<HTMLElement | null>(null);
+  const pinchZoomRef = useRef<{ d0: number; z0: number } | null>(null);
+  const [zoomPct, setZoomPct] = useState(100);
   const undoRef = useRef<LayerItem[][]>([]);
   const redoRef = useRef<LayerItem[][]>([]);
   const pointerRef = useRef<number | null>(null);
@@ -202,7 +221,9 @@ export default function InkOverlay({
     try {
       const raw = window.localStorage.getItem(PREFS_KEY);
       if (raw) {
-        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown } | null;
+        const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown; shapes?: unknown; alignMark?: unknown } | null;
+        if (p && typeof p.shapes === "boolean") setShapesOn(p.shapes);
+        if (p && typeof p.alignMark === "boolean") setAlignMark(p.alignMark);
         if (p && typeof p.convFont === "number" && Number.isInteger(p.convFont) && p.convFont >= 0 && p.convFont < CONV_FONTS.length) {
           setConvFont(p.convFont);
         }
@@ -219,11 +240,11 @@ export default function InkOverlay({
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
     try {
-      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay }));
+      window.localStorage.setItem(PREFS_KEY, JSON.stringify({ convFont, autoDelay, shapes: shapesOn, alignMark }));
     } catch {
       // armazenamento indisponível: a preferência vale só nesta sessão
     }
-  }, [convFont, autoDelay]);
+  }, [convFont, autoDelay, shapesOn, alignMark]);
 
   // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
   // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
@@ -279,6 +300,27 @@ export default function InkOverlay({
     ro?.observe(el);
     return () => ro?.disconnect();
   }, [show]);
+
+  const applyZoom = (z: number) => {
+    const host = canvasRef.current?.parentElement ?? hostRef.current;
+    if (!host) return;
+    hostRef.current = host;
+    zoomRef.current = z;
+    host.style.transformOrigin = "0 0";
+    host.style.transform = z === 1 ? "" : `scale(${z})`;
+    setZoomPct(Math.round(z * 100));
+  };
+  const applyZoomRef = useRef(applyZoom);
+  applyZoomRef.current = applyZoom;
+  useEffect(
+    () => () => {
+      if (hostRef.current) {
+        hostRef.current.style.transform = "";
+        hostRef.current.style.transformOrigin = "";
+      }
+    },
+    []
+  );
 
   // Redesenha tudo o que já está pronto (traços, textos, laço e seleção). O traço em andamento fica na camada "viva".
   const paint = useCallback(() => {
@@ -418,7 +460,7 @@ export default function InkOverlay({
     const d = draftRef.current;
     const canvas = liveRef.current;
     const w = sizeRef.current.w;
-    if (!d || !canvas || !w) return;
+    if (!d || !canvas || !w || snapRef.current) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const dpr = dprRef.current;
@@ -476,6 +518,62 @@ export default function InkOverlay({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
 
+  const clearHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = 0;
+    holdAnchorRef.current = null;
+  };
+
+  // Caneta parada no fim do traço: se parece uma forma (linha, círculo, triângulo, retângulo), mostra a versão
+  // reta no lugar do traço. Ao levantar, ela é guardada; se voltar a mexer, o traço continua livre.
+  const armHold = () => {
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = 0;
+      const d = draftRef.current;
+      const w = sizeRef.current.w;
+      const live = liveRef.current;
+      if (!d || !w || !live || d.tool !== "pen" || !shapesOnRef.current) return;
+      const item = snapStroke(d, w);
+      const ctx = live.getContext("2d");
+      if (!item || !ctx) return;
+      snapRef.current = item;
+      clearLive();
+      ctx.setTransform(dprRef.current, 0, 0, dprRef.current, 0, 0);
+      drawInkItem(ctx, item, w);
+      try {
+        navigator.vibrate?.(8);
+      } catch {
+        // sem vibração neste aparelho
+      }
+    }, HOLD_MS);
+  };
+
+  // Marca-texto: troca o traço torto por uma faixa reta em cada linha de texto marcada.
+  const alignHighlight = (d: InkItem): InkItem[] | null => {
+    const canvas = canvasRef.current;
+    if (!canvas || d.pts.length < 4) return null;
+    const r = canvas.getBoundingClientRect();
+    const p = d.pts;
+    let sum = 0;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 1; i < p.length; i += 2) {
+      const y = p[i] * r.width;
+      sum += y;
+      lo = Math.min(lo, y);
+      hi = Math.max(hi, y);
+    }
+    const s = { x: r.left + p[0] * r.width, y: r.top + p[1] * r.width };
+    const e = { x: r.left + p[p.length - 2] * r.width, y: r.top + p[p.length - 1] * r.width };
+    if (Math.abs(s.x - e.x) + Math.abs(s.y - e.y) < 12) return null;
+    if (hi - lo <= 28) {
+      // traço de uma linha só: usa a altura média, assim um traço levemente torto cai na linha certa
+      s.y = e.y = r.top + sum / (p.length / 2);
+    }
+    return highlightLines({ start: s, end: e, canvas, color: d.color });
+  };
+
   // Ao levantar a caneta: o traço pronto é desenhado direto na camada principal (sem redesenhar a página).
   const drawFinished = (it: Item) => {
     const canvas = isMarker(it) && markRef.current ? markRef.current : canvasRef.current;
@@ -502,6 +600,8 @@ export default function InkOverlay({
     }
     lassoRef.current = null;
     draftRef.current = null;
+    snapRef.current = null;
+    clearHold();
     pointerRef.current = null;
     clearLive();
     schedule();
@@ -545,6 +645,8 @@ export default function InkOverlay({
       touchesRef.current.clear();
       pinchRef.current = null;
       panRef.current = null;
+      pinchZoomRef.current = null;
+      if (zoomRef.current !== 1) applyZoomRef.current(1);
       penHoverRef.current = false;
       tapRef.current = null;
       lastTapRef.current = null;
@@ -563,9 +665,11 @@ export default function InkOverlay({
     touchesRef.current.clear();
     pinchRef.current = null;
     panRef.current = null;
+    pinchZoomRef.current = null;
   }, [writing]);
 
   useEffect(() => () => window.clearTimeout(autoTimerRef.current), []);
+  useEffect(() => () => window.clearTimeout(holdTimerRef.current), []);
 
   // Mostra a barra de ferramentas e programa o sumiço dela (só no modo automático).
   const showBar = useCallback(() => {
@@ -726,7 +830,7 @@ export default function InkOverlay({
     }
     const ids = only ? new Set(only) : new Set(pendingRef.current);
     if (!only) pendingRef.current = new Set();
-    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && ids.has(it.id));
+    const src = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !it.shape && ids.has(it.id));
     const w = sizeRef.current.w;
     if (!src.length) return;
     if (!w) {
@@ -816,7 +920,7 @@ export default function InkOverlay({
 
   // Conversão depois de escrever: tudo de uma vez (ou só o que está selecionado com o laço), no mesmo lugar.
   const convertNow = () => {
-    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen");
+    const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !it.shape);
     const picked = selRef.current;
     const src = picked.size ? pens.filter((it) => picked.has(it.id)) : pens;
     if (!src.length) {
@@ -839,8 +943,8 @@ export default function InkOverlay({
       panRef.current = null;
     }
     // Dois dedos na tela: com o laço e algo selecionado, a pinça aumenta ou diminui a seleção; nos demais casos,
-    // movem a página sem sair do modo de escrita. Vale mesmo com a S Pen em uso; palma da mão (toque largo) é ignorada,
-    // assim como toques enquanto a caneta está escrevendo.
+    // movem a página (e a pinça dá zoom) sem sair do modo de escrita. Vale mesmo com a S Pen em uso; palma da mão
+    // (toque largo) é ignorada, assim como toques enquanto a caneta está escrevendo.
     if (e.pointerType === "touch") {
       const palm = Math.max(e.width, e.height) > PALM_PX;
       const penBusy = pointerRef.current !== null && drawTypeRef.current === "pen";
@@ -864,6 +968,7 @@ export default function InkOverlay({
           } else {
             cancelGesture();
             panRef.current = touchCentroid();
+            pinchZoomRef.current = d0 > 10 ? { d0, z0: zoomRef.current } : null;
           }
           return;
         }
@@ -938,7 +1043,23 @@ export default function InkOverlay({
         e.preventDefault();
         const c = touchCentroid();
         if (c) {
-          window.scrollBy(panRef.current.x - c.x, panRef.current.y - c.y);
+          const pz = pinchZoomRef.current;
+          const host = canvasRef.current?.parentElement;
+          const [a, b] = Array.from(touchesRef.current.values());
+          if (pz && host && a && b) {
+            // Pinça: amplia a página mantendo sob os dedos o mesmo ponto do conteúdo; o movimento do centro rola a página.
+            const z = zoomRef.current;
+            const hr = host.getBoundingClientRect();
+            const px = (panRef.current.x - hr.left) / z;
+            const py = (panRef.current.y - hr.top) / z;
+            let nz = Math.max(1, Math.min(ZOOM_MAX, (pz.z0 * Math.hypot(a.x - b.x, a.y - b.y)) / pz.d0));
+            if (nz < 1.04) nz = 1;
+            applyZoom(nz);
+            const hr2 = host.getBoundingClientRect();
+            window.scrollBy(hr2.left + px * nz - c.x, hr2.top + py * nz - c.y);
+          } else {
+            window.scrollBy(panRef.current.x - c.x, panRef.current.y - c.y);
+          }
           panRef.current = c;
         }
         return;
@@ -983,6 +1104,19 @@ export default function InkOverlay({
             pr.push(Math.round((pr[pr.length - 1] * 0.6 + raw * 0.4) * 100) / 100);
           }
         }
+        // Formas: reinicia a contagem da pausa quando a caneta anda; tremidinha de poucos pixels não conta.
+        if (draftRef.current.tool === "pen" && shapesOnRef.current) {
+          const an = holdAnchorRef.current;
+          const moved = !an || Math.hypot(x - an.x, y - an.y) * size.w > (snapRef.current ? 6 : 4);
+          if (moved) {
+            if (snapRef.current) {
+              snapRef.current = null; // voltou a mexer: o traço continua livre
+              clearLive();
+            }
+            holdAnchorRef.current = { x, y };
+            armHold();
+          }
+        }
       }
     }
     // Escrevendo perto da borda da tela: a página rola junto.
@@ -1016,7 +1150,10 @@ export default function InkOverlay({
         }
         return;
       }
-      if (touchesRef.current.size < 2) panRef.current = null;
+      if (touchesRef.current.size < 2) {
+        panRef.current = null;
+        pinchZoomRef.current = null;
+      }
       if (e.pointerId !== pointerRef.current) return;
     }
     if (e.pointerId !== pointerRef.current) return;
@@ -1052,6 +1189,24 @@ export default function InkOverlay({
     }
     const d = draftRef.current;
     draftRef.current = null;
+    const snapped = snapRef.current;
+    snapRef.current = null;
+    clearHold();
+    if (d && snapped) {
+      commit([...itemsRef.current, snapped], itemsRef.current);
+      drawFinished(snapped);
+      clearLive();
+      return;
+    }
+    if (d && d.tool === "highlighter" && alignMarkRef.current) {
+      const bands = alignHighlight(d);
+      if (bands) {
+        commit([...itemsRef.current, ...bands], itemsRef.current);
+        bands.forEach(drawFinished);
+        clearLive();
+        return;
+      }
+    }
     if (d) {
       // Toque rápido da caneta, sem arrastar: sozinho é só um ponto (como um ponto final);
       // dois toques seguidos, perto um do outro, colocam o cursor do texto ali (o ponto do primeiro toque some).
@@ -1112,7 +1267,10 @@ export default function InkOverlay({
         pinchRef.current = null;
         schedule();
       }
-      if (touchesRef.current.size < 2) panRef.current = null;
+      if (touchesRef.current.size < 2) {
+        panRef.current = null;
+        pinchZoomRef.current = null;
+      }
       if (e.pointerId !== pointerRef.current) return;
     }
     if (e.pointerId !== pointerRef.current) return;
@@ -1129,6 +1287,8 @@ export default function InkOverlay({
     eraseBaseRef.current = null;
     // Descarta o traço incompleto.
     draftRef.current = null;
+    snapRef.current = null;
+    clearHold();
     lassoRef.current = null;
     tapRef.current = null;
     if (e.pointerType === "pen") {
@@ -1197,6 +1357,27 @@ export default function InkOverlay({
     schedule();
   };
 
+  // Endireita os traços selecionados que parecem uma forma (sem precisar segurar a caneta).
+  const straighten = () => {
+    const w = size.w;
+    if (!w) return;
+    const base = itemsRef.current;
+    let changed = false;
+    const next = base.map((it): LayerItem => {
+      if (!selRef.current.has(it.id) || it.kind !== "ink") return it;
+      const s = snapStroke(it, w);
+      if (!s) return it;
+      changed = true;
+      return s;
+    });
+    if (!changed) {
+      setAutoMsg("Não encontrei formas nos traços selecionados.");
+      return;
+    }
+    commit(next, base);
+    setSelection([]);
+  };
+
   const commitSmooth = () => {
     if (Math.abs(smoothRef.current - layer.smooth) > 0.001) pushNow();
   };
@@ -1212,7 +1393,7 @@ export default function InkOverlay({
     if (!size.w) return;
     const base = itemsRef.current;
     const picked = selRef.current;
-    const ink = base.filter(isInkLike);
+    const ink = base.filter(isInkLike).filter((it) => !(it.kind === "ink" && it.shape));
     const target = picked.size ? ink.filter((it) => picked.has(it.id)) : ink;
     const tidied = tidyItems(target, size.w, tidyAmt);
     const byId = new Map(tidied.map((it) => [it.id, it] as const));
@@ -1223,7 +1404,7 @@ export default function InkOverlay({
   // Reconhece a escrita (da seleção com o laço, ou da página toda) e mostra o texto para conferir antes de inserir.
   const convert = async () => {
     if (convBusy) return;
-    const ink = itemsRef.current.filter(isInkLike);
+    const ink = itemsRef.current.filter(isInkLike).filter((it) => !(it.kind === "ink" && it.shape));
     const src = selRef.current.size ? ink.filter((it) => selRef.current.has(it.id)) : ink;
     setConvBusy(true);
     setConvErr(null);
@@ -1289,7 +1470,7 @@ export default function InkOverlay({
     scrollbarWidth: "none",
     flexWrap: "nowrap",
   };
-  const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen");
+  const hasPen = itemsRef.current.some((it) => it.kind === "ink" && it.tool === "pen" && !it.shape);
 
   // Modo automático: o desenho só captura a caneta (e só quando ela está perto); no modo clássico captura tudo.
   const capture = active && writing && (!auto || penNear);
@@ -1351,371 +1532,396 @@ export default function InkOverlay({
           mixBlendMode: tool === "highlighter" ? "multiply" : "normal",
         }}
       />
-      {active && !barVisible && (
-        <button
-          type="button"
-          aria-label="Mostrar as ferramentas de escrita à mão"
-          onClick={showBar}
-          style={{
-            position: "fixed",
-            right: 12,
-            bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 12px + env(safe-area-inset-bottom, 0px))",
-            zIndex: 60,
-            width: 44,
-            height: 44,
-            borderRadius: "50%",
-            border: "1px solid var(--line, #d5dbe3)",
-            background: "var(--card, #fff)",
-            boxShadow: "0 4px 16px rgba(0,0,0,.18)",
-            fontSize: 20,
-          }}
-        >
-          ✍
-        </button>
-      )}
-      {active && barVisible && (
-        <div
-          role="toolbar"
-          aria-label="Escrita sobre a página"
-          onPointerDown={() => {
-            if (auto) showBar();
-          }}
-          onMouseDown={(e) => {
-            // No modo automático, tocar nas ferramentas não tira o cursor (nem fecha o teclado) do texto.
-            if (auto && !(e.target as HTMLElement).closest("textarea,input,select")) e.preventDefault();
-          }}
-          style={{
-            position: "fixed",
-            left: 8,
-            right: 8,
-            bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 8px + env(safe-area-inset-bottom, 0px))",
-            zIndex: 60,
-            display: "grid",
-            gap: 4,
-            padding: 8,
-            borderRadius: 12,
-            border: "1px solid var(--line, #d5dbe3)",
-            background: "var(--card, #fff)",
-            boxShadow: "0 6px 24px rgba(0,0,0,.18)",
-            userSelect: "none",
-            WebkitUserSelect: "none",
-            maxHeight: "min(48vh, 440px)",
-            overflowY: "auto",
-            overscrollBehavior: "contain",
-            WebkitOverflowScrolling: "touch",
-          }}
-        >
-          {autoMsg && (
-            <div
-              role="status"
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 8,
-                padding: "8px 10px",
-                borderRadius: 9,
-                background: "var(--bg, #f1f5f9)",
-                fontSize: 13,
-              }}
-            >
-              <span>{autoMsg}</span>
-              {autoMsg !== "Convertendo…" && pendingRef.current.size > 0 && (
-                <button
-                  type="button"
-                  style={btn(true)}
-                  onClick={() => {
-                    setAutoMsg("Convertendo…");
-                    void runAuto();
-                  }}
-                >
-                  Tentar novamente
-                </button>
-              )}
-            </div>
-          )}
-          {convOpen && (
-            <div role="group" aria-label="Converter escrita em texto" style={{ display: "grid", gap: 6 }}>
-              {convText === null ? (
-                <>
-                  <div style={row}>
-                    {CONV_FONTS.map((f, i) => (
-                      <button
-                        type="button"
-                        key={f.name}
-                        aria-label={`Fonte ${f.name}`}
-                        style={{ ...btn(convFont === i), fontSize: 15, fontFamily: f.v ?? undefined }}
-                        onClick={() => setConvFont(i)}
-                      >
-                        {f.name}
+      {/* As barras ficam no <body> (portal): se ficassem dentro da página, o zoom a ampliaria junto. */}
+      {active &&
+        !barVisible &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <button
+            type="button"
+            aria-label="Mostrar as ferramentas de escrita à mão"
+            onClick={showBar}
+            style={{
+              position: "fixed",
+              right: 12,
+              bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 12px + env(safe-area-inset-bottom, 0px))",
+              zIndex: 60,
+              width: 44,
+              height: 44,
+              borderRadius: "50%",
+              border: "1px solid var(--line, #d5dbe3)",
+              background: "var(--card, #fff)",
+              boxShadow: "0 4px 16px rgba(0,0,0,.18)",
+              fontSize: 20,
+            }}
+          >
+            ✍
+          </button>,
+          document.body
+        )}
+      {active &&
+        barVisible &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            role="toolbar"
+            aria-label="Escrita sobre a página"
+            onPointerDown={() => {
+              if (auto) showBar();
+            }}
+            onMouseDown={(e) => {
+              // No modo automático, tocar nas ferramentas não tira o cursor (nem fecha o teclado) do texto.
+              if (auto && !(e.target as HTMLElement).closest("textarea,input,select")) e.preventDefault();
+            }}
+            style={{
+              position: "fixed",
+              left: 8,
+              right: 8,
+              bottom: "calc(var(--kb, 0px) + var(--dock-h, 0px) + 8px + env(safe-area-inset-bottom, 0px))",
+              zIndex: 60,
+              display: "grid",
+              gap: 4,
+              padding: 8,
+              borderRadius: 12,
+              border: "1px solid var(--line, #d5dbe3)",
+              background: "var(--card, #fff)",
+              boxShadow: "0 6px 24px rgba(0,0,0,.18)",
+              userSelect: "none",
+              WebkitUserSelect: "none",
+              maxHeight: "min(48vh, 440px)",
+              overflowY: "auto",
+              overscrollBehavior: "contain",
+              WebkitOverflowScrolling: "touch",
+            }}
+          >
+            {autoMsg && (
+              <div
+                role="status"
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderRadius: 9,
+                  background: "var(--bg, #f1f5f9)",
+                  fontSize: 13,
+                }}
+              >
+                <span>{autoMsg}</span>
+                {autoMsg !== "Convertendo…" && pendingRef.current.size > 0 && (
+                  <button
+                    type="button"
+                    style={btn(true)}
+                    onClick={() => {
+                      setAutoMsg("Convertendo…");
+                      void runAuto();
+                    }}
+                  >
+                    Tentar novamente
+                  </button>
+                )}
+              </div>
+            )}
+            {convOpen && (
+              <div role="group" aria-label="Converter escrita em texto" style={{ display: "grid", gap: 6 }}>
+                {convText === null ? (
+                  <>
+                    <div style={row}>
+                      {CONV_FONTS.map((f, i) => (
+                        <button
+                          type="button"
+                          key={f.name}
+                          aria-label={`Fonte ${f.name}`}
+                          style={{ ...btn(convFont === i), fontSize: 15, fontFamily: f.v ?? undefined }}
+                          onClick={() => setConvFont(i)}
+                        >
+                          {f.name}
+                        </button>
+                      ))}
+                    </div>
+                    <b style={{ fontSize: 13 }}>Enquanto eu escrevo</b>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, fontWeight: 600 }}>
+                      <input
+                        type="checkbox"
+                        checked={autoOn}
+                        onChange={(e) => {
+                          setAutoOn(e.target.checked);
+                          if (!e.target.checked) {
+                            stopAuto();
+                            setAutoMsg(null);
+                          }
+                        }}
+                      />
+                      Converter sozinha quando eu parar de escrever
+                    </label>
+                    {autoOn && (
+                      <>
+                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Pausa</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={10}
+                            step={1}
+                            value={autoDelay}
+                            aria-label="Tempo de pausa antes de converter"
+                            onChange={(e) => setAutoDelay(Number(e.target.value))}
+                            style={{ flex: 1, minWidth: 80 }}
+                          />
+                          <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
+                        </div>
+                        <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
+                          Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Setas, traços soltos, linhas e círculos ficam como desenho e não viram texto; ↶ desfaz. Precisa de internet.
+                        </p>
+                      </>
+                    )}
+                    <b style={{ fontSize: 13 }}>Depois de escrever</b>
+                    <div style={row}>
+                      <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={convertNow}>
+                        {selIds.length ? `Converter agora os ${selIds.length} selecionados` : "Converter toda a escrita agora"}
                       </button>
-                    ))}
-                  </div>
-                  <b style={{ fontSize: 13 }}>Enquanto eu escrevo</b>
-                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, fontWeight: 600 }}>
-                    <input
-                      type="checkbox"
-                      checked={autoOn}
-                      onChange={(e) => {
-                        setAutoOn(e.target.checked);
-                        if (!e.target.checked) {
-                          stopAuto();
-                          setAutoMsg(null);
-                        }
+                    </div>
+                    <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                      Escreva tudo o que quiser e converta no fim, no mesmo lugar. Use o ⬚ Laço para escolher só um trecho.
+                    </p>
+                    <div style={row}>
+                      <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
+                        {convBusy
+                          ? "Reconhecendo…"
+                          : selIds.length
+                            ? `Passar para o texto da página: os ${selIds.length} selecionados`
+                            : "Passar toda a escrita para o texto da página (editável)"}
+                      </button>
+                    </div>
+                    {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
+                  </>
+                ) : (
+                  <>
+                    <textarea
+                      value={convText}
+                      aria-label="Texto reconhecido: confira e corrija antes de inserir"
+                      onChange={(e) => setConvText(e.target.value)}
+                      rows={4}
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        minHeight: 72,
+                        padding: 8,
+                        borderRadius: 8,
+                        border: "1px solid var(--line, #d5dbe3)",
+                        fontSize: 16,
+                        fontFamily: CONV_FONTS[convFont].v ?? undefined,
+                        userSelect: "text",
+                        WebkitUserSelect: "text",
                       }}
                     />
-                    Converter sozinha quando eu parar de escrever
-                  </label>
-                  {autoOn && (
-                    <>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                        <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Pausa</span>
-                        <input
-                          type="range"
-                          min={2}
-                          max={10}
-                          step={1}
-                          value={autoDelay}
-                          aria-label="Tempo de pausa antes de converter"
-                          onChange={(e) => setAutoDelay(Number(e.target.value))}
-                          style={{ flex: 1, minWidth: 80 }}
-                        />
-                        <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{autoDelay} s</b>
-                      </div>
-                      <p style={{ margin: 0, fontSize: 12, opacity: 0.75 }}>
-                        Espera você parar por {autoDelay} s (com a caneta longe da tela), ou converte na hora quando você começa a linha de baixo. A letra vira texto na fonte escolhida, no mesmo lugar e na mesma cor. Setas, traços soltos, linhas e círculos ficam como desenho e não viram texto; ↶ desfaz. Precisa de internet.
-                      </p>
-                    </>
-                  )}
-                  <b style={{ fontSize: 13 }}>Depois de escrever</b>
-                  <div style={row}>
-                    <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={convertNow}>
-                      {selIds.length ? `Converter agora os ${selIds.length} selecionados` : "Converter toda a escrita agora"}
-                    </button>
-                  </div>
-                  <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
-                    Escreva tudo o que quiser e converta no fim, no mesmo lugar. Use o ⬚ Laço para escolher só um trecho.
-                  </p>
-                  <div style={row}>
-                    <button type="button" style={btn(false, convBusy)} disabled={convBusy} onClick={convert}>
-                      {convBusy
-                        ? "Reconhecendo…"
-                        : selIds.length
-                          ? `Passar para o texto da página: os ${selIds.length} selecionados`
-                          : "Passar toda a escrita para o texto da página (editável)"}
-                    </button>
-                  </div>
-                  {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
-                </>
-              ) : (
-                <>
-                  <textarea
-                    value={convText}
-                    aria-label="Texto reconhecido: confira e corrija antes de inserir"
-                    onChange={(e) => setConvText(e.target.value)}
-                    rows={4}
-                    style={{
-                      width: "100%",
-                      boxSizing: "border-box",
-                      minHeight: 72,
-                      padding: 8,
-                      borderRadius: 8,
-                      border: "1px solid var(--line, #d5dbe3)",
-                      fontSize: 16,
-                      fontFamily: CONV_FONTS[convFont].v ?? undefined,
-                      userSelect: "text",
-                      WebkitUserSelect: "text",
-                    }}
+                    {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+                      <input type="checkbox" checked={convErase} onChange={(e) => setConvErase(e.target.checked)} />
+                      Apagar a escrita à mão convertida (dá para desfazer com ↶)
+                    </label>
+                    <div style={row}>
+                      <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={insertConverted}>Inserir no texto</button>
+                      <button
+                        type="button"
+                        style={btn()}
+                        onClick={() => {
+                          setConvText(null);
+                          setConvErr(null);
+                        }}
+                      >
+                        Voltar
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            {enhance && (
+              <div role="group" aria-label="Aperfeiçar escrita" style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <b style={{ fontSize: 13, minWidth: 64 }}>Suavizar</b>
+                  <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Natural</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={Math.round(smooth * 100)}
+                    aria-label="Intensidade da suavização dos traços"
+                    onChange={(e) => setSmooth(Number(e.target.value) / 100)}
+                    onPointerUp={commitSmooth}
+                    onTouchEnd={commitSmooth}
+                    onKeyUp={commitSmooth}
+                    onBlur={commitSmooth}
+                    style={{ flex: 1, minWidth: 80 }}
                   />
-                  {convErr && <p style={{ margin: 0, fontSize: 13, color: "#b91c1c" }}>{convErr}</p>}
-                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
-                    <input type="checkbox" checked={convErase} onChange={(e) => setConvErase(e.target.checked)} />
-                    Apagar a escrita à mão convertida (dá para desfazer com ↶)
-                  </label>
-                  <div style={row}>
-                    <button type="button" style={{ ...btn(true), fontWeight: 700 }} onClick={insertConverted}>Inserir no texto</button>
-                    <button
-                      type="button"
-                      style={btn()}
-                      onClick={() => {
-                        setConvText(null);
-                        setConvErr(null);
-                      }}
-                    >
-                      Voltar
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-          {enhance && (
-            <div role="group" aria-label="Aperfeiçar escrita" style={{ display: "grid", gap: 8 }}>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <b style={{ fontSize: 13, minWidth: 64 }}>Suavizar</b>
-                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Natural</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={Math.round(smooth * 100)}
-                  aria-label="Intensidade da suavização dos traços"
-                  onChange={(e) => setSmooth(Number(e.target.value) / 100)}
-                  onPointerUp={commitSmooth}
-                  onTouchEnd={commitSmooth}
-                  onKeyUp={commitSmooth}
-                  onBlur={commitSmooth}
-                  style={{ flex: 1, minWidth: 80 }}
-                />
-                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Suave</span>
-                <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(smooth * 100)}%</b>
+                  <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Suave</span>
+                  <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(smooth * 100)}%</b>
+                </div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <b style={{ fontSize: 13, minWidth: 64 }}>Organizar</b>
+                  <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Leve</span>
+                  <input
+                    type="range"
+                    min={10}
+                    max={100}
+                    step={5}
+                    value={Math.round(tidyAmt * 100)}
+                    aria-label="Intensidade da organização da escrita"
+                    onChange={(e) => setTidyAmt(Number(e.target.value) / 100)}
+                    style={{ flex: 1, minWidth: 80 }}
+                  />
+                  <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Forte</span>
+                  <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(tidyAmt * 100)}%</b>
+                </div>
+                <div style={row}>
+                  <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={organize}>
+                    {selIds.length ? "Organizar a seleção" : "Organizar a escrita da página"}
+                  </button>
+                </div>
+                <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
+                  Alinha as linhas, deixa as palavras do mesmo tamanho e com o mesmo espaço, mantendo o seu traço. Não gostou? Toque em ↶.
+                </p>
               </div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                <b style={{ fontSize: 13, minWidth: 64 }}>Organizar</b>
-                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Leve</span>
-                <input
-                  type="range"
-                  min={10}
-                  max={100}
-                  step={5}
-                  value={Math.round(tidyAmt * 100)}
-                  aria-label="Intensidade da organização da escrita"
-                  onChange={(e) => setTidyAmt(Number(e.target.value) / 100)}
-                  style={{ flex: 1, minWidth: 80 }}
-                />
-                <span style={{ fontSize: 13, whiteSpace: "nowrap" }}>Forte</span>
-                <b style={{ fontSize: 13, minWidth: 36, textAlign: "right" }}>{Math.round(tidyAmt * 100)}%</b>
+            )}
+            {tool === "lasso" && selIds.length > 0 && (
+              <div role="toolbar" aria-label="Ações da seleção" style={row}>
+                <button type="button" style={btn()} onClick={deleteSelection}>Excluir seleção</button>
+                <button type="button" style={btn()} onClick={straighten}>Endireitar formas</button>
+                <button type="button" style={btn()} onClick={duplicateSelection}>Duplicar</button>
+                <button type="button" style={btn()} onClick={recolorSelection}>Pintar com a cor atual</button>
+                <button type="button" style={btn()} onClick={() => setSelection([])}>Soltar</button>
               </div>
-              <div style={row}>
-                <button type="button" style={{ ...btn(true, !hasPen), fontWeight: 700 }} disabled={!hasPen} onClick={organize}>
-                  {selIds.length ? "Organizar a seleção" : "Organizar a escrita da página"}
-                </button>
-              </div>
-              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>
-                Alinha as linhas, deixa as palavras do mesmo tamanho e com o mesmo espaço, mantendo o seu traço. Não gostou? Toque em ↶.
-              </p>
-            </div>
-          )}
-          {tool === "lasso" && selIds.length > 0 && (
-            <div role="toolbar" aria-label="Ações da seleção" style={row}>
-              <button type="button" style={btn()} onClick={deleteSelection}>Excluir seleção</button>
-              <button type="button" style={btn()} onClick={duplicateSelection}>Duplicar</button>
-              <button type="button" style={btn()} onClick={recolorSelection}>Pintar com a cor atual</button>
-              <button type="button" style={btn()} onClick={() => setSelection([])}>Soltar</button>
-            </div>
-          )}
-          <div style={row}>
-            <button
-              type="button"
-              aria-label={writing ? "Parar de escrever e rolar a página" : "Voltar a escrever"}
-              style={btn(writing)}
-              onClick={() => {
-                penSeenRef.current = false;
-                setWriting((v) => !v);
-              }}
-            >
-              {writing ? "✍ Escrevendo" : "✋ Rolando"}
-            </button>
-            {onAutoChange && (
+            )}
+            <div style={row}>
               <button
                 type="button"
-                aria-label={
-                  auto
-                    ? "Caneta automática ligada: a caneta escreve direto; dedo e teclado digitam; dois toques da caneta colocam o cursor; o botão da caneta apaga. Toque para desligar"
-                    : "Ligar a caneta automática: a caneta escreve direto; dedo e teclado digitam"
-                }
-                style={btn(auto)}
-                onClick={() => onAutoChange(!auto)}
+                aria-label={writing ? "Parar de escrever e rolar a página" : "Voltar a escrever"}
+                style={btn(writing)}
+                onClick={() => {
+                  penSeenRef.current = false;
+                  setWriting((v) => !v);
+                }}
               >
-                {auto ? "⚡ Auto" : "⚡"}
+                {writing ? "✍ Escrevendo" : "✋ Rolando"}
               </button>
-            )}
-            <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
-            <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
-            <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
-            <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
-            <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
-            <button
-              type="button"
-              aria-label="Converter escrita em texto digitado"
-              style={btn(convOpen || autoOn)}
-              onClick={() => {
-                setConvOpen((v) => !v);
-                setConvText(null);
-                setConvErr(null);
-              }}
-            >
-              {autoOn ? "Aa ●" : "Aa"}
-            </button>
-            <button type="button" aria-label="Desfazer" disabled={!undoRef.current.length} style={btn(false, !undoRef.current.length)} onClick={undo}>↶</button>
-            <button type="button" aria-label="Refazer" disabled={!redoRef.current.length} style={btn(false, !redoRef.current.length)} onClick={redo}>↷</button>
-            <button type="button" aria-label="Apagar toda a escrita sobre a página" style={btn()} onClick={clearAll}>Limpar</button>
-            <button
-              type="button"
-              aria-label={auto ? "Pausar a caneta e voltar só ao texto" : "Concluir e voltar a editar o texto"}
-              style={{ ...btn(), fontWeight: 700 }}
-              onClick={() => {
-                flushPush();
-                onClose();
-              }}
-            >
-              {auto ? "Pausar" : "Concluir"}
-            </button>
-          </div>
-          {drawing && (
-            <div style={row}>
-              {palette.map((c, i) => (
+              {zoomPct > 100 && (
+                <button type="button" aria-label="Voltar ao tamanho normal da página" style={btn(true)} onClick={() => applyZoom(1)}>
+                  🔍 {zoomPct}% · 1×
+                </button>
+              )}
+              {onAutoChange && (
                 <button
                   type="button"
-                  key={c}
-                  aria-label={`Cor ${i + 1}`}
-                  onClick={() => setColorIdx(i)}
+                  aria-label={
+                    auto
+                      ? "Caneta automática ligada: a caneta escreve direto; dedo e teclado digitam; dois toques da caneta colocam o cursor; o botão da caneta apaga. Toque para desligar"
+                      : "Ligar a caneta automática: a caneta escreve direto; dedo e teclado digitam"
+                  }
+                  style={btn(auto)}
+                  onClick={() => onAutoChange(!auto)}
+                >
+                  {auto ? "⚡ Auto" : "⚡"}
+                </button>
+              )}
+              <button type="button" aria-label="Caneta" style={btn(tool === "pen")} onClick={() => pickTool("pen")}>✎</button>
+              <button type="button" aria-label="Marca-texto" style={btn(tool === "highlighter")} onClick={() => pickTool("highlighter")}>▮</button>
+              <button type="button" aria-label="Borracha" style={btn(tool === "eraser")} onClick={() => pickTool("eraser")}>⌫</button>
+              <button type="button" aria-label="Laço: selecionar, mover, aumentar com dois dedos e apagar traços" style={btn(tool === "lasso")} onClick={() => pickTool("lasso")}>⬚ Laço</button>
+              <button type="button" aria-label="Aperfeiçoar escrita" style={btn(enhance)} onClick={() => setEnhance((v) => !v)}>✨</button>
+              <button
+                type="button"
+                aria-label="Formas automáticas: segure a caneta parada no fim do traço para endireitar"
+                title="Segure a caneta parada no fim do traço"
+                style={btn(shapesOn)}
+                onClick={() => setShapesOn((v) => !v)}
+              >
+                △ Formas
+              </button>
+              <button type="button" aria-label="Marca-texto alinhado às linhas de texto" style={btn(alignMark)} onClick={() => setAlignMark((v) => !v)}>≡ Alinhar</button>
+              <button
+                type="button"
+                aria-label="Converter escrita em texto digitado"
+                style={btn(convOpen || autoOn)}
+                onClick={() => {
+                  setConvOpen((v) => !v);
+                  setConvText(null);
+                  setConvErr(null);
+                }}
+              >
+                {autoOn ? "Aa ●" : "Aa"}
+              </button>
+              <button type="button" aria-label="Desfazer" disabled={!undoRef.current.length} style={btn(false, !undoRef.current.length)} onClick={undo}>↶</button>
+              <button type="button" aria-label="Refazer" disabled={!redoRef.current.length} style={btn(false, !redoRef.current.length)} onClick={redo}>↷</button>
+              <button type="button" aria-label="Apagar toda a escrita sobre a página" style={btn()} onClick={clearAll}>Limpar</button>
+              <button
+                type="button"
+                aria-label={auto ? "Pausar a caneta e voltar só ao texto" : "Concluir e voltar a editar o texto"}
+                style={{ ...btn(), fontWeight: 700 }}
+                onClick={() => {
+                  flushPush();
+                  onClose();
+                }}
+              >
+                {auto ? "Pausar" : "Concluir"}
+              </button>
+            </div>
+            {drawing && (
+              <div style={row}>
+                {palette.map((c, i) => (
+                  <button
+                    type="button"
+                    key={c}
+                    aria-label={`Cor ${i + 1}`}
+                    onClick={() => setColorIdx(i)}
+                    style={{
+                      flex: "0 0 auto",
+                      width: 28,
+                      height: 28,
+                      borderRadius: "50%",
+                      background: c,
+                      border: colorIdx === i ? "3px solid var(--ink, #1b2430)" : "2px solid #fff",
+                      boxShadow: "0 0 0 1px var(--line, #d5dbe3)",
+                    }}
+                  />
+                ))}
+                <label
+                  aria-label="Escolher outra cor"
                   style={{
                     flex: "0 0 auto",
                     width: 28,
                     height: 28,
                     borderRadius: "50%",
-                    background: c,
-                    border: colorIdx === i ? "3px solid var(--ink, #1b2430)" : "2px solid #fff",
+                    overflow: "hidden",
+                    position: "relative",
+                    background: "conic-gradient(red, yellow, lime, aqua, blue, magenta, red)",
+                    border: colorIdx === -1 ? "3px solid var(--ink, #1b2430)" : "2px solid #fff",
                     boxShadow: "0 0 0 1px var(--line, #d5dbe3)",
                   }}
-                />
-              ))}
-              <label
-                aria-label="Escolher outra cor"
-                style={{
-                  flex: "0 0 auto",
-                  width: 28,
-                  height: 28,
-                  borderRadius: "50%",
-                  overflow: "hidden",
-                  position: "relative",
-                  background: "conic-gradient(red, yellow, lime, aqua, blue, magenta, red)",
-                  border: colorIdx === -1 ? "3px solid var(--ink, #1b2430)" : "2px solid #fff",
-                  boxShadow: "0 0 0 1px var(--line, #d5dbe3)",
-                }}
-              >
-                <input
-                  type="color"
-                  value={custom}
-                  onChange={(e) => {
-                    setCustom(e.target.value);
-                    setColorIdx(-1);
-                  }}
-                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
-                />
-              </label>
-              {[4, 8, 13].map((d, i) => (
-                <button type="button" key={d} aria-label={`Espessura ${i + 1}`} style={{ ...btn(sizeIdx === i), display: "grid", placeItems: "center" }} onClick={() => setSizeIdx(i)}>
-                  <span style={{ width: d, height: d, borderRadius: "50%", background: sizeIdx === i ? "#fff" : "currentColor", display: "block" }} />
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+                >
+                  <input
+                    type="color"
+                    value={custom}
+                    onChange={(e) => {
+                      setCustom(e.target.value);
+                      setColorIdx(-1);
+                    }}
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
+                  />
+                </label>
+                {[4, 8, 13].map((d, i) => (
+                  <button type="button" key={d} aria-label={`Espessura ${i + 1}`} style={{ ...btn(sizeIdx === i), display: "grid", placeItems: "center" }} onClick={() => setSizeIdx(i)}>
+                    <span style={{ width: d, height: d, borderRadius: "50%", background: sizeIdx === i ? "#fff" : "currentColor", display: "block" }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>,
+          document.body
+        )}
     </>
   );
 }
