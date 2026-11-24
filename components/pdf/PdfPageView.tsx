@@ -7,6 +7,7 @@ import { drawItem, drawItems, hitItem } from "./draw";
 import NoteCard from "./NoteCard";
 import ReadOnlyNote from "./ReadOnlyNote";
 import { CONV_FONTS, setConvPrefs, useConvPrefs } from "./conv";
+import { snapShape } from "./shape-snap";
 import { recognizeInk, shapeIds, type Anchor } from "../editor/ink-recognize";
 import { findMate, joinText } from "../editor/ink-merge";
 import { boundsOf, pickedByLasso } from "../editor/ink-geometry";
@@ -53,8 +54,8 @@ export type PageProps = {
 };
 
 type Session =
-  | { kind: "ink"; pid: number; tool: "pen" | "highlighter"; color: string; width: number; pts: number[] }
-  | { kind: "ellipse"; pid: number; color: string; width: number; x0: number; y0: number; x1: number; y1: number }
+  | { kind: "ink"; pid: number; tool: "pen" | "highlighter"; color: string; width: number; pts: number[]; snapped?: boolean }
+  | { kind: "ellipse"; pid: number; color: string; width: number; x0: number; y0: number; x1: number; y1: number; locked?: boolean }
   | { kind: "lasso"; pid: number; pts: number[] }
   | { kind: "drag"; pid: number; sx: number; sy: number; base: PageAnn; ids: Set<string>; moved: boolean }
   | { kind: "erase"; pid: number; cur: PageAnn; removed: Item[]; removedTexts: TextItem[] };
@@ -67,6 +68,8 @@ const TEXT_SCALE = 2;
 const GHOST_A = 0.18; // depois da conversão, a letra à mão fica clarinha atrás do texto para você conferir
 const GHOST_MS = 9000;
 const HOVER_EXTRA_MS = 1500; // caneta pairando: a conversão sai depois da pausa mais esse tempo
+const SNAP_HOLD_MS = 600; // segurar a caneta parada no fim do traço endireita a forma (reta, seta, quadrado, círculo…)
+const SNAP_JITTER_PX = 4;
 const SEL_TAP_PX = 8; // laço/arrasto sem mexer mais que isso = toque (abre a correção do texto)
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -194,6 +197,8 @@ function PdfPageView(p: PageProps) {
   const pending = useRef<Set<string>>(new Set());
   const autoTimer = useRef(0);
   const penHover = useRef(false);
+  const holdTimer = useRef(0);
+  const holdAnchor = useRef<[number, number]>([0, 0]);
   const busy = useRef(false);
   const runRef = useRef<(only: Set<string> | null, manual: boolean) => void>(() => undefined);
 
@@ -487,6 +492,7 @@ function PdfPageView(p: PageProps) {
   function move(s: Session, clientX: number, clientY: number) {
     const [x, y] = toPage(clientX, clientY);
     if (s.kind === "ink") {
+      if (s.snapped) return; // forma já endireitada: o resto do movimento não deforma
       const len = s.pts.length;
       const lx = s.pts[len - 2];
       const ly = s.pts[len - 1];
@@ -510,6 +516,7 @@ function PdfPageView(p: PageProps) {
       annRef.current = next;
       p.onApply(n, next);
     } else if (s.kind === "ellipse") {
+      if (s.locked) return;
       s.x1 = x;
       s.y1 = y;
     } else {
@@ -527,6 +534,49 @@ function PdfPageView(p: PageProps) {
         p.onApply(n, s.cur);
       }
     }
+  }
+
+  // Retificar formas (como no Samsung Notes): com a caneta parada no fim do traço, a forma vira certinha.
+  function armHold(s: Session) {
+    window.clearTimeout(holdTimer.current);
+    holdTimer.current = 0;
+    if (s.kind !== "ink" || s.tool !== "pen" || !prefsRef.current.snapOn) return;
+    holdTimer.current = window.setTimeout(() => {
+      holdTimer.current = 0;
+      const cur = session.current;
+      if (!cur || cur !== s || cur.kind !== "ink" || cur.snapped) return;
+      const shape = snapShape(cur.pts, width, height);
+      if (!shape) return;
+      if (shape.kind === "poly") {
+        cur.pts = shape.pts;
+        cur.snapped = true;
+      } else {
+        session.current = {
+          kind: "ellipse",
+          pid: cur.pid,
+          color: cur.color,
+          width: cur.width,
+          x0: shape.cx - shape.rx,
+          y0: shape.cy - shape.ry,
+          x1: shape.cx + shape.rx,
+          y1: shape.cy + shape.ry,
+          locked: true,
+        };
+      }
+      try {
+        navigator.vibrate?.(12);
+      } catch {
+        /* sem vibração neste aparelho */
+      }
+      setMsgQuick(shape.label);
+      paintLive();
+    }, SNAP_HOLD_MS);
+  }
+
+  function setMsgQuick(label: string) {
+    window.clearTimeout(msgTimer.current);
+    setMsg(label);
+    msgTimer.current = window.setTimeout(() => setMsg(null), 1200);
   }
 
   function onDown(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -563,6 +613,8 @@ function PdfPageView(p: PageProps) {
       move(s, e.clientX, e.clientY);
     }
     session.current = s;
+    holdAnchor.current = [e.clientX, e.clientY];
+    armHold(s);
     paintLive();
   }
 
@@ -582,6 +634,11 @@ function PdfPageView(p: PageProps) {
     const coalesced = e.nativeEvent.getCoalescedEvents?.() ?? [];
     const list = coalesced.length > 0 ? coalesced : [e.nativeEvent];
     for (const ev of list) move(s, ev.clientX, ev.clientY);
+    // Mexeu de verdade (mais que o tremor da mão)? A contagem de "caneta parada" recomeça.
+    if (Math.hypot(e.clientX - holdAnchor.current[0], e.clientY - holdAnchor.current[1]) > SNAP_JITTER_PX) {
+      holdAnchor.current = [e.clientX, e.clientY];
+      armHold(s);
+    }
     paintLive();
   }
 
@@ -602,6 +659,8 @@ function PdfPageView(p: PageProps) {
     const s = session.current;
     if (!s || s.pid !== e.pointerId) return;
     session.current = null;
+    window.clearTimeout(holdTimer.current);
+    holdTimer.current = 0;
     const before = annRef.current;
     if (s.kind === "drag") {
       if (cancelled || !s.moved) {
@@ -659,7 +718,8 @@ function PdfPageView(p: PageProps) {
     } else if (!cancelled) {
       let item: Item | null = null;
       if (s.kind === "ink") {
-        item = { id: uid(), kind: "ink", tool: s.tool, color: s.color, width: s.width, pts: s.pts };
+        // Forma endireitada: nunca vira texto na conversão da escrita.
+        item = { id: uid(), kind: "ink", tool: s.tool, color: s.color, width: s.width, pts: s.pts, ...(s.snapped ? { keep: true } : {}) };
       } else {
         const rx = Math.abs(s.x1 - s.x0) / 2;
         const ry = Math.abs(s.y1 - s.y0) / 2;
@@ -681,7 +741,7 @@ function PdfPageView(p: PageProps) {
         annRef.current = next;
         p.onApply(n, next);
         p.onRecord(opAddItem(n, item));
-        if (item.kind === "ink" && item.tool === "pen" && prefsRef.current.autoOn) {
+        if (item.kind === "ink" && item.tool === "pen" && !item.keep && prefsRef.current.autoOn) {
           // Se este traço começou outra linha, a linha anterior já está pronta e é convertida agora.
           if (pending.current.size) {
             const r = height / width;
@@ -1196,6 +1256,10 @@ function PdfPageView(p: PageProps) {
               <button type="button" className="pdfnb-btn on" style={chipBtn} disabled={!hasPen || convBusy} onClick={convertNow}>
                 {convBusy ? "Convertendo…" : selIds.length ? `Converter os ${selIds.length} selecionados` : "Converter a escrita"}
               </button>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
+                <input type="checkbox" checked={prefs.snapOn} onChange={(e) => setConvPrefs({ snapOn: e.target.checked })} />
+                Endireitar formas: segure a caneta parada no fim do traço
+              </label>
               <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
                 <input
                   type="checkbox"
