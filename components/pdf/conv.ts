@@ -11,10 +11,10 @@ export const CONV_FONTS: { name: string; v: string | null }[] = [
   { name: "Kalam", v: 'Kalam, "Segoe Print", "Bradley Hand", cursive' },
 ];
 
-export type ConvPrefs = { convFont: number; autoDelay: number; autoOn: boolean };
+export type ConvPrefs = { convFont: number; autoDelay: number; autoOn: boolean; snapOn: boolean };
 
 const KEY = "mednotes-ink-prefs";
-let prefs: ConvPrefs = { convFont: 4, autoDelay: 4, autoOn: false };
+let prefs: ConvPrefs = { convFont: 4, autoDelay: 4, autoOn: false, snapOn: true };
 let loaded = false;
 const subs = new Set<() => void>();
 
@@ -24,7 +24,8 @@ function load() {
   try {
     const raw = window.localStorage.getItem(KEY);
     if (!raw) return;
-    const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown } | null;
+    const p = JSON.parse(raw) as { convFont?: unknown; autoDelay?: unknown; snapOn?: unknown } | null;
+    if (p && typeof p.snapOn === "boolean") prefs.snapOn = p.snapOn;
     if (p && typeof p.convFont === "number" && Number.isInteger(p.convFont) && p.convFont >= 0 && p.convFont < CONV_FONTS.length) prefs.convFont = p.convFont;
     if (p && typeof p.autoDelay === "number" && p.autoDelay >= 2 && p.autoDelay <= 10) prefs.autoDelay = Math.round(p.autoDelay);
   } catch {
@@ -43,7 +44,7 @@ export function setConvPrefs(p: Partial<ConvPrefs>) {
   try {
     const raw = window.localStorage.getItem(KEY);
     const old = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
-    window.localStorage.setItem(KEY, JSON.stringify({ ...old, convFont: prefs.convFont, autoDelay: prefs.autoDelay }));
+    window.localStorage.setItem(KEY, JSON.stringify({ ...old, convFont: prefs.convFont, autoDelay: prefs.autoDelay, snapOn: prefs.snapOn }));
   } catch {
     /* vale só nesta sessão */
   }
