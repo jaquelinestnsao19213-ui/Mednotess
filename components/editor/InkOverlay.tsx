@@ -41,11 +41,11 @@ const CONV_FONTS: { name: string; v: string | null }[] = [
   { name: "Kalam", v: 'Kalam, "Segoe Print", "Bradley Hand", cursive' },
 ];
 
-const FADE_MS = 320; // duração da transição da letra à mão para o texto
-const GHOST_A = 0.18; // depois da conversão, a letra à mão fica bem clarinha atrás do texto para você conferir
-const GHOST_MS = 9000; // por quanto tempo a letra clarinha fica (some antes se você voltar a escrever)
+const FADE_MS = 320; // (não usado mais na conversão: o texto aparece na hora; fica só para o desenho antigo)
+const GHOST_A = 0.18; // (idem: a letra à mão não fica mais clarinha atrás do texto depois de converter)
 const HOVER_EXTRA_MS = 1500; // caneta parada pairando sobre a tela: a conversão sai depois da pausa mais esse tempo
-const PUSH_DELAY_MS = 400; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
+const PUSH_DELAY_MS = 1500; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
+const PREFETCH_MS = 2300; // pausa depois de um traço: a leitura da escrita começa em segundo plano, para "converter" sair na hora (mais pausa = menos chamadas à IA)
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
@@ -173,13 +173,13 @@ export default function InkOverlay({
   const editBaseRef = useRef<LayerItem[] | null>(null);
   // Textos que acabaram de ser convertidos (para o botão "Corrigir" logo depois da conversão automática).
   const [lastConv, setLastConv] = useState<string[]>([]);
-  // Letra à mão que acabou de ser convertida: fica clarinha atrás do texto só para conferir (não é salva).
+  // (Não é mais usado na conversão: a letra à mão some na hora. Fica só para limpar o desenho antigo.)
   const ghostRef = useRef<Item[] | null>(null);
   const ghostTimerRef = useRef(0);
 
   // Conversão automática: depois de uma pausa (que você escolhe), a escrita recente vira texto na fonte escolhida, no mesmo lugar
   const [autoOn, setAutoOn] = useState(false);
-  const [autoDelay, setAutoDelay] = useState(4); // segundos de pausa antes de converter sozinha
+  const [autoDelay, setAutoDelay] = useState(2); // segundos de pausa antes de converter sozinha
   const [autoMsg, setAutoMsg] = useState<string | null>(null);
   const autoOnRef = useRef(false);
   autoOnRef.current = autoOn;
@@ -193,6 +193,9 @@ export default function InkOverlay({
   const autoTimerRef = useRef(0);
   const autoBusyRef = useRef(false);
   const runAutoRef = useRef<() => void>(() => undefined);
+  // Leitura da escrita em segundo plano: só dos traços escritos nesta sessão; o resultado fica guardado para o "converter" sair na hora.
+  const prefetchTimerRef = useRef(0);
+  const sessionInkRef = useRef<Set<string>>(new Set());
   // S Pen sobre a área de escrita (tocando ou pairando): a contagem da pausa só começa quando ela sai.
   const penHoverRef = useRef(false);
   // Transição da conversão: a letra à mão some aos poucos enquanto o texto aparece.
@@ -260,8 +263,8 @@ export default function InkOverlay({
     }
   }, [convFont, autoDelay, shapesOn]);
 
-  // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa curta,
-  // para não serializar a página inteira a cada traço; ao concluir, sair da página ou fechar o app, sai na hora.
+  // Envia a escrita ao editor (que guarda a página). Durante a escrita isso espera uma pausa mais longa,
+  // para não serializar a página inteira (e travar o próximo traço) a cada palavra; ao concluir, sair da página ou fechar o app, sai na hora.
   const pushNow = () => {
     window.clearTimeout(pushTimerRef.current);
     pushTimerRef.current = 0;
@@ -272,6 +275,11 @@ export default function InkOverlay({
     window.clearTimeout(pushTimerRef.current);
     pushTimerRef.current = window.setTimeout(() => {
       pushTimerRef.current = 0;
+      // Caneta no meio de um traço: o salvamento espera mais um pouco para não atrapalhar a escrita.
+      if (pointerRef.current !== null) {
+        queuePush();
+        return;
+      }
       pushNow();
     }, PUSH_DELAY_MS);
   };
@@ -447,6 +455,7 @@ export default function InkOverlay({
       window.clearTimeout(barTimerRef.current);
       window.clearTimeout(ghostTimerRef.current);
       window.clearTimeout(holdTimerRef.current);
+      window.clearTimeout(prefetchTimerRef.current);
     },
     []
   );
@@ -512,6 +521,15 @@ export default function InkOverlay({
       liveRafRef.current = 0;
       drawLive();
     });
+  };
+
+  // Desenha na hora (sem esperar o próximo quadro): o ponto aparece assim que a caneta encosta e o traço acompanha cada movimento.
+  const drawLiveNow = () => {
+    if (liveRafRef.current) {
+      cancelAnimationFrame(liveRafRef.current);
+      liveRafRef.current = 0;
+    }
+    drawLive();
   };
 
   const clearLive = () => {
@@ -643,6 +661,7 @@ export default function InkOverlay({
       lastTapRef.current = null;
       ghostRef.current = null;
       editBaseRef.current = null;
+      window.clearTimeout(prefetchTimerRef.current);
       clearLive();
       setConvOpen(false);
       setConvText(null);
@@ -810,6 +829,22 @@ export default function InkOverlay({
         return { left: b[0] * w, top: b[1] * w, right: b[2] * w, bottom: b[3] * w };
       });
 
+  // Leitura em segundo plano: poucos instantes depois do último traço, as linhas escritas nesta sessão já são lidas
+  // e o resultado fica guardado. Quando você toca em converter (ou a conversão automática dispara), a resposta sai na hora.
+  // Se falhar (sem internet, sem login), nada acontece: a conversão normal tenta de novo quando for pedida.
+  const schedulePrefetch = () => {
+    window.clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = window.setTimeout(() => {
+      prefetchTimerRef.current = 0;
+      const w = sizeRef.current.w;
+      if (!w || pointerRef.current !== null) return;
+      const mine = sessionInkRef.current;
+      const pens = itemsRef.current.filter((it): it is InkItem => it.kind === "ink" && it.tool === "pen" && !isShape(it) && mine.has(it.id));
+      if (!pens.length || pens.length > 600) return;
+      recognizeInk(pens, w, textAnchors(w)).catch(() => undefined);
+    }, PREFETCH_MS);
+  };
+
   // ---------- Corrigir o texto convertido, direto no lugar ----------
   // Abre um campo de texto por linha convertida. Cada letra digitada já aparece na página; "Pronto" fecha e entra no histórico (↶).
   const openEdit = (ids: string[]) => {
@@ -949,20 +984,10 @@ export default function InkOverlay({
       const remaining = work.filter((it) => !gone.has(it.id) && stillPresent.has(it.id));
       remaining.forEach((it) => pendingRef.current.add(it.id));
       if (gone.size || fresh.length || updated.size) {
-        const goneItems = base.filter((it): it is Item => it.kind !== "text" && gone.has(it.id));
-        fadeRef.current = {
-          t0: performance.now(),
-          gone: goneItems,
-          texts: new Set(fresh.map((t) => t.id)),
-        };
-        // A letra à mão fica clarinha atrás do texto por alguns segundos, para conferir.
-        ghostRef.current = goneItems.length ? goneItems : null;
+        // O texto entra na hora e a letra à mão some junto: sem transição e sem a letra clarinha atrás.
+        fadeRef.current = null;
+        ghostRef.current = null;
         window.clearTimeout(ghostTimerRef.current);
-        ghostTimerRef.current = window.setTimeout(() => {
-          ghostTimerRef.current = 0;
-          ghostRef.current = null;
-          scheduleRef.current();
-        }, GHOST_MS);
         const kept = base.filter((it) => !gone.has(it.id)).map((it): LayerItem => (it.kind === "text" ? (updated.get(it.id) ?? it) : it));
         commit([...kept, ...fresh], base);
         schedule();
@@ -1057,6 +1082,8 @@ export default function InkOverlay({
     drawTypeRef.current = e.pointerType;
     window.clearTimeout(autoTimerRef.current); // voltou a escrever: espera a próxima pausa
     autoTimerRef.current = 0;
+    window.clearTimeout(prefetchTimerRef.current); // e a leitura em segundo plano também espera
+    prefetchTimerRef.current = 0;
     const [x, y] = toPoint(e.clientX, e.clientY);
 
     // S Pen: com o botão da caneta (ou a ponta de borracha) apertado, ela apaga naquele gesto, sem trocar de ferramenta.
@@ -1112,7 +1139,7 @@ export default function InkOverlay({
     };
     snapRef.current = null;
     armHold(e.clientX, e.clientY);
-    scheduleLive();
+    drawLiveNow(); // o ponto aparece assim que a caneta encosta
   };
 
   const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -1196,7 +1223,7 @@ export default function InkOverlay({
     if (draftRef.current) {
       if (e.clientY > window.innerHeight - 150) window.scrollBy(0, 14);
       else if (e.clientY < 50) window.scrollBy(0, -14);
-      scheduleLive();
+      drawLiveNow(); // o traço acompanha a caneta no mesmo instante, sem esperar o próximo quadro
     } else {
       schedule();
     }
@@ -1290,6 +1317,7 @@ export default function InkOverlay({
           itemsRef.current = itemsRef.current.filter((it) => it.id !== prev.id);
           undoRef.current.pop(); // o ponto do primeiro toque sai também do histórico
           pendingRef.current.delete(prev.id);
+          sessionInkRef.current.delete(prev.id);
           queuePush();
         }
         clearLive();
@@ -1302,6 +1330,11 @@ export default function InkOverlay({
       drawFinished(fin);
       clearLive();
       lastTapRef.current = isTap ? { id: d.id, t: now, x: e.clientX, y: e.clientY } : null;
+      if (d.tool === "pen" && !snap) {
+        // Traço de caneta novo: a leitura dele começa em segundo plano depois de uma pausa.
+        sessionInkRef.current.add(d.id);
+        schedulePrefetch();
+      }
       if (autoOnRef.current && d.tool === "pen" && !snap) {
         // Se este traço começou outra linha, a linha anterior já está pronta e é convertida agora.
         // Se continua na mesma linha, espera a pausa para não converter no meio da escrita.
@@ -1763,7 +1796,7 @@ export default function InkOverlay({
                   Pronto
                 </button>
               </div>
-              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>A letra à mão clarinha atrás do texto é só para você conferir. Apague o campo e toque em Pronto para remover a linha; ↶ desfaz.</p>
+              <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>Apague o campo e toque em Pronto para remover a linha; ↶ desfaz.</p>
             </div>
           )}
           {convOpen && (

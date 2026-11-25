@@ -1,7 +1,8 @@
 import type { InkItem, Item } from "../pdf/types";
 
 // Converte a escrita à mão (traços da caneta) em texto, uma linha por vez.
-// Os traços são agrupados em linhas pela posição vertical e enviados a /api/handwriting.
+// Os traços são agrupados em linhas pela posição vertical e enviados a /api/handwriting
+// (o servidor lê a imagem de cada linha com o Claude e usa o Google só como reserva).
 // Setas, traços soltos (travessão de lista, sublinhado), linhas longas e círculos grandes NÃO são letras:
 // ficam de fora da conversão e continuam como desenho (ver shapeIds).
 // Você também decide: traço marcado com "keep" (Manter como desenho) nunca vira texto,
@@ -325,6 +326,52 @@ export function groupIntoLines(items: Item[], w: number, anchors: Anchor[] = [])
     .sort((a, b) => a.top - b.top);
 }
 
+// Desenha a linha numa imagem (preto sobre branco) para o Claude ler. Devolve o PNG em base64 (sem o prefixo "data:").
+// Linhas pequenas são ampliadas para a letra ficar nítida; linhas muito largas são reduzidas.
+function renderLineImage(ink: number[][][], w: number, h: number): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  try {
+    let scale = Math.min(3, Math.max(1, 128 / h));
+    scale = Math.min(scale, 1800 / w, 400 / h);
+    if (!(scale > 0.25)) return undefined;
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return undefined;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.strokeStyle = "#000000";
+    ctx.fillStyle = "#000000";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(2, Math.min(7, ch / 22));
+    for (const stroke of ink) {
+      const xs = stroke[0];
+      const ys = stroke[1];
+      if (!xs || !ys || !xs.length) continue;
+      const still = xs.every((x, i) => Math.abs(x - xs[0]) < 0.5 && Math.abs(ys[i] - ys[0]) < 0.5);
+      if (still) {
+        ctx.beginPath();
+        ctx.arc(xs[0] * scale, ys[0] * scale, ctx.lineWidth * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+        continue;
+      }
+      ctx.beginPath();
+      ctx.moveTo(xs[0] * scale, ys[0] * scale);
+      for (let i = 1; i < xs.length; i++) ctx.lineTo(xs[i] * scale, ys[i] * scale);
+      ctx.stroke();
+    }
+    const url = canvas.toDataURL("image/png");
+    const at = url.indexOf(",");
+    return at >= 0 ? url.slice(at + 1) : undefined;
+  } catch {
+    return undefined; // sem imagem o servidor usa o reconhecedor de reserva
+  }
+}
+
 function payload(g: Group, w: number) {
   const pad = 12;
   // Espaço horizontal a partir do qual um traço novo é tratado como começo de outra palavra.
@@ -360,22 +407,50 @@ function payload(g: Group, w: number) {
     t += 150;
     return [xs, ys, ts];
   });
-  return {
-    w: Math.max(1, Math.ceil(g.right - g.left + pad * 2)),
-    h: Math.max(1, Math.ceil(g.bottom - g.top + pad * 2)),
-    ink,
-  };
+  const lw = Math.max(1, Math.ceil(g.right - g.left + pad * 2));
+  const lh = Math.max(1, Math.ceil(g.bottom - g.top + pad * 2));
+  return { w: lw, h: lh, ink, image: renderLineImage(ink, lw, lh) };
 }
 
-export async function recognizeInk(items: Item[], pageW: number, anchors: Anchor[] = []): Promise<{ lines: Recognized[]; failed: number }> {
-  const groups = groupIntoLines(items, pageW, anchors);
-  if (!groups.length) return { lines: [], failed: 0 };
-  if (groups.length > 40) throw new Error("São muitas linhas de uma vez. Selecione um trecho menor com o laço.");
+type LinePayload = ReturnType<typeof payload>;
 
+// ---------- Resultados guardados e pedidos em andamento ----------
+// Cada linha (traços + largura da página) é reconhecida uma vez só: se a mesma linha for pedida de novo
+// (por exemplo ao tocar em converter depois de a leitura já ter sido feita em segundo plano), sai na hora.
+
+const DONE_MAX = 300;
+const done = new Map<string, string>();
+const pending = new Map<string, Promise<string | null>>();
+
+function sigOf(g: Group, w: number): string {
+  return `${Math.round(w)}|${g.items.map((it) => `${it.id}:${it.pts.length}`).join(",")}`;
+}
+
+function remember(sig: string, text: string) {
+  done.set(sig, text);
+  while (done.size > DONE_MAX) {
+    const first = done.keys().next().value;
+    if (first === undefined) break;
+    done.delete(first);
+  }
+}
+
+async function sessionToken(): Promise<string | null> {
+  try {
+    const { supabase } = await import("@/lib/supabase");
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function requestBatch(lines: LinePayload[]): Promise<(string | null)[]> {
+  const token = await sessionToken();
   const res = await fetch("/api/handwriting", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lines: groups.map((g) => payload(g, pageW)), language: "pt" }),
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify({ lines, language: "pt" }),
   });
   if (!res.ok) {
     let msg = "Não consegui reconhecer a escrita agora.";
@@ -388,7 +463,37 @@ export async function recognizeInk(items: Item[], pageW: number, anchors: Anchor
     throw new Error(msg);
   }
   const data = (await res.json()) as { lines?: (string | null)[] };
-  const texts = data.lines ?? [];
+  return data.lines ?? [];
+}
+
+export async function recognizeInk(items: Item[], pageW: number, anchors: Anchor[] = []): Promise<{ lines: Recognized[]; failed: number }> {
+  const groups = groupIntoLines(items, pageW, anchors);
+  if (!groups.length) return { lines: [], failed: 0 };
+  if (groups.length > 40) throw new Error("São muitas linhas de uma vez. Selecione um trecho menor com o laço.");
+
+  const sigs = groups.map((g) => sigOf(g, pageW));
+  const need: number[] = [];
+  sigs.forEach((s, i) => {
+    if (!done.has(s) && !pending.has(s)) need.push(i);
+  });
+  if (need.length) {
+    const batch = requestBatch(need.map((i) => payload(groups[i], pageW)));
+    need.forEach((gi, k) => {
+      const sig = sigs[gi];
+      const p = batch.then((texts) => {
+        const text = texts[k] ?? null;
+        if (text) remember(sig, text);
+        return text;
+      });
+      pending.set(sig, p);
+      p.then(
+        () => pending.delete(sig),
+        () => pending.delete(sig)
+      );
+    });
+  }
+
+  const texts = await Promise.all(sigs.map((s) => (done.has(s) ? Promise.resolve(done.get(s) as string) : (pending.get(s) ?? Promise.resolve(null)))));
   const lines: Recognized[] = [];
   let failed = 0;
   groups.forEach((g, i) => {
@@ -400,7 +505,7 @@ export async function recognizeInk(items: Item[], pageW: number, anchors: Anchor
     lines.push({ text, ids: g.items.map((it) => it.id), left: g.left, top: g.top, right: g.right, bottom: g.bottom, color: g.items[0].color });
   });
   if (!lines.length) {
-    throw new Error("O reconhecedor gratuito do Google não respondeu agora. Tente de novo em instantes.");
+    throw new Error("Não consegui reconhecer a escrita agora. Tente de novo em instantes.");
   }
   return { lines, failed };
 }
