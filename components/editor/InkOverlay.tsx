@@ -45,7 +45,7 @@ const FADE_MS = 320; // (não usado mais na conversão: o texto aparece na hora;
 const GHOST_A = 0.18; // (idem: a letra à mão não fica mais clarinha atrás do texto depois de converter)
 const HOVER_EXTRA_MS = 1500; // caneta parada pairando sobre a tela: a conversão sai depois da pausa mais esse tempo
 const PUSH_DELAY_MS = 1500; // espera antes de enviar a escrita ao editor (salvamento); sai na hora ao concluir
-const PREFETCH_MS = 900; // pausa curta depois de um traço: a leitura da escrita começa em segundo plano, para "converter" sair na hora
+const PREFETCH_MS = 2300; // pausa depois de um traço: a leitura da escrita começa em segundo plano, para "converter" sair na hora (mais pausa = menos chamadas à IA)
 const PALM_PX = 60; // toque maior que isso é palma da mão, não dedo
 const PREFS_KEY = "mednotes-ink-prefs"; // preferências de conversão guardadas no aparelho (fonte e pausa)
 const PEN_AWAY_MS = 350; // modo automático: tempo sem a caneta perto da tela até o dedo voltar a mexer no texto
@@ -1331,7 +1331,7 @@ export default function InkOverlay({
       clearLive();
       lastTapRef.current = isTap ? { id: d.id, t: now, x: e.clientX, y: e.clientY } : null;
       if (d.tool === "pen" && !snap) {
-        // Traço de caneta novo: a leitura dele começa em segundo plano depois de uma pausa curta.
+        // Traço de caneta novo: a leitura dele começa em segundo plano depois de uma pausa.
         sessionInkRef.current.add(d.id);
         schedulePrefetch();
       }
