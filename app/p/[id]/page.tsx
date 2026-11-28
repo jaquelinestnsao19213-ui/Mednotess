@@ -14,6 +14,7 @@ import SubpagesTable from "@/components/SubpagesTable";
 import PageMovePicker from "@/components/PageMovePicker";
 import SharePanel from "@/components/SharePanel";
 import { deletePages, deletionMessage, movePage, planDeletion } from "@/lib/page-ops";
+import { measureOwnerBlocks } from "@/lib/ink-anchors";
 
 const Editor = dynamic(() => import("@/components/Editor"), { ssr: false });
 
@@ -23,12 +24,27 @@ type SharedPageRow = PageRow & { share_token?: string | null };
 
 // Tamanho de referência da escrita à mão: largura da folha (em pixels) e espaço entre parágrafos da tela em que a escrita foi feita.
 // Fica guardado na página (chave "inkRef") para o link compartilhado montar a folha do mesmo jeito e a escrita ficar no lugar.
-type InkRef = { w: number; pg: "compact" | "normal" | "airy" };
+// "tops" e "h": topo de cada bloco do texto (e altura total) nesta tela, para o link compartilhado corrigir diferenças de altura
+// (imagens, vídeos, tabelas) e a escrita continuar ao lado do mesmo trecho do texto.
+type InkRef = { w: number; pg: "compact" | "normal" | "airy"; tops?: number[]; h?: number };
 
 function readInkRef(value: unknown): InkRef | null {
-  const r = value as { w?: unknown; pg?: unknown } | null | undefined;
+  const r = value as { w?: unknown; pg?: unknown; tops?: unknown; h?: unknown } | null | undefined;
   if (!r || typeof r.w !== "number" || !Number.isFinite(r.w) || r.w < 200 || r.w > 4000) return null;
-  return { w: Math.round(r.w), pg: r.pg === "compact" || r.pg === "airy" ? r.pg : "normal" };
+  const ref: InkRef = { w: Math.round(r.w), pg: r.pg === "compact" || r.pg === "airy" ? r.pg : "normal" };
+  if (
+    Array.isArray(r.tops) &&
+    r.tops.length > 0 &&
+    r.tops.length <= 5000 &&
+    r.tops.every((t) => typeof t === "number" && Number.isFinite(t)) &&
+    typeof r.h === "number" &&
+    Number.isFinite(r.h) &&
+    r.h > 0
+  ) {
+    ref.tops = r.tops as number[];
+    ref.h = r.h;
+  }
+  return ref;
 }
 
 // Mede a folha do editor nesta tela (a mesma área sobre a qual a escrita à mão é desenhada).
@@ -86,10 +102,30 @@ function PageView({ id }: { id: string }) {
     return inkRefRef.current ? { ...doc, inkRef: inkRefRef.current } : doc;
   }
 
+  // Na hora de salvar, guarda também o topo de cada bloco do texto (na largura em que a escrita foi feita).
+  // O link do visitante compara com os blocos dele e desloca a escrita junto, mesmo que imagens ou vídeos tenham altura diferente.
+  function withBlockMap(doc: JSONContent): JSONContent {
+    // Editor já fechado (saindo da página): não dá para medir, mantém o que já estava.
+    if (!document.querySelector(".editor .tiptap")) return doc;
+    const base = inkRefRef.current ?? measureInkRef();
+    if (!base) return doc;
+    const ref: InkRef = { w: base.w, pg: base.pg };
+    const map = measureOwnerBlocks();
+    // Só vale se a folha foi medida na mesma largura em que a escrita está posicionada.
+    if (map && Math.abs(map.w - base.w) <= 2) {
+      ref.tops = map.tops;
+      ref.h = map.h;
+    }
+    inkRefRef.current = ref;
+    return { ...doc, inkRef: ref };
+  }
+
   async function flush() {
     const patch = pending.current;
     pending.current = {};
     if (Object.keys(patch).length === 0) return;
+    const content = patch.content as JSONContent | undefined;
+    if (content && inkItemsOf(content)) patch.content = withBlockMap(content);
     const { error } = await supabase.from("pages").update(patch).eq("id", id);
     setError(error ? "Não foi possível salvar. Tente de novo." : null);
     setStatus("saved");
@@ -194,15 +230,16 @@ function PageView({ id }: { id: string }) {
     })();
   }, [id, reloadKey]);
 
-  // Páginas com escrita à mão feitas antes desta correção não têm a referência guardada: ao abrir a página,
-  // a largura desta tela (onde ela aparece certinha) é guardada, e o link compartilhado passa a usar essa largura.
+  // Páginas com escrita à mão feitas antes desta correção não têm a referência guardada (largura da folha e topo de cada bloco):
+  // ao abrir a página, o que esta tela mostra (onde a escrita aparece certinha) é guardado, e o link compartilhado passa a usar isso.
+  // Espera as imagens carregarem para medir as alturas certas.
   useEffect(() => {
     if (!page?.id) return;
     let tries = 0;
     const iv = window.setInterval(() => {
       tries += 1;
       const cur = pageRef.current;
-      if (!cur || tries > 10 || inkRefRef.current) {
+      if (!cur || tries > 12 || inkRefRef.current?.tops) {
         window.clearInterval(iv);
         return;
       }
@@ -211,11 +248,20 @@ function PageView({ id }: { id: string }) {
         window.clearInterval(iv);
         return;
       }
-      const measured = measureInkRef();
-      if (!measured) return;
+      const base = inkRefRef.current ?? measureInkRef();
+      const map = measureOwnerBlocks();
+      if (!base || !map) return;
       window.clearInterval(iv);
-      inkRefRef.current = measured;
-      const next = { ...doc, inkRef: measured };
+      const ref: InkRef = { w: base.w, pg: base.pg };
+      // As alturas só valem se foram medidas na largura em que a escrita foi feita.
+      if (Math.abs(map.w - base.w) <= 2) {
+        ref.tops = map.tops;
+        ref.h = map.h;
+      } else if (inkRefRef.current) {
+        return;
+      }
+      inkRefRef.current = ref;
+      const next = { ...doc, inkRef: ref };
       setPage((c) => (c ? { ...c, content: next } : c));
       save({ content: next });
     }, 1000);
