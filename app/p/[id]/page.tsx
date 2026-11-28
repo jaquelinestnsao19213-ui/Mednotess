@@ -21,6 +21,32 @@ type Crumb = { id: string; title: string };
 // share_token só existe depois de executar o schema21.sql
 type SharedPageRow = PageRow & { share_token?: string | null };
 
+// Tamanho de referência da escrita à mão: largura da folha (em pixels) e espaço entre parágrafos da tela em que a escrita foi feita.
+// Fica guardado na página (chave "inkRef") para o link compartilhado montar a folha do mesmo jeito e a escrita ficar no lugar.
+type InkRef = { w: number; pg: "compact" | "normal" | "airy" };
+
+function readInkRef(value: unknown): InkRef | null {
+  const r = value as { w?: unknown; pg?: unknown } | null | undefined;
+  if (!r || typeof r.w !== "number" || !Number.isFinite(r.w) || r.w < 200 || r.w > 4000) return null;
+  return { w: Math.round(r.w), pg: r.pg === "compact" || r.pg === "airy" ? r.pg : "normal" };
+}
+
+// Mede a folha do editor nesta tela (a mesma área sobre a qual a escrita à mão é desenhada).
+function measureInkRef(): InkRef | null {
+  const tip = document.querySelector<HTMLElement>(".editor .tiptap");
+  const wrap = tip?.closest<HTMLElement>('[style*="position: relative"]') ?? tip?.closest<HTMLElement>(".editor") ?? null;
+  const w = wrap?.clientWidth ?? 0;
+  if (w < 200) return null;
+  const pg = document.documentElement.dataset.pg;
+  return { w: Math.round(w), pg: pg === "compact" || pg === "airy" ? pg : "normal" };
+}
+
+// Traços e textos da escrita à mão desta página (nulo quando não há nenhum).
+function inkItemsOf(doc: JSONContent): unknown[] | null {
+  const items = (doc.inkLayer as { items?: unknown } | null | undefined)?.items;
+  return Array.isArray(items) && items.length > 0 ? items : null;
+}
+
 export default function PageRoute() {
   const { id } = useParams<{ id: string }>();
   return <PageView key={id} id={id} />;
@@ -41,6 +67,24 @@ function PageView({ id }: { id: string }) {
   const pending = useRef<Record<string, unknown>>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const coverInput = useRef<HTMLInputElement>(null);
+
+  // Referência da escrita à mão: a que está guardada na página e os traços a que ela se refere.
+  // Se os traços mudarem (escreveu ou mexeu na escrita), a referência passa a ser a desta tela; se só o texto mudou, continua a mesma.
+  const pageRef = useRef<SharedPageRow | null>(null);
+  pageRef.current = page;
+  const inkRefRef = useRef<InkRef | null>(null);
+  const lastInkItems = useRef<unknown[] | null>(null);
+
+  function withInkRef(doc: JSONContent): JSONContent {
+    const items = inkItemsOf(doc);
+    if (!items) return doc;
+    if (items !== lastInkItems.current || !inkRefRef.current) {
+      const measured = measureInkRef();
+      if (measured) inkRefRef.current = measured;
+    }
+    lastInkItems.current = items;
+    return inkRefRef.current ? { ...doc, inkRef: inkRefRef.current } : doc;
+  }
 
   async function flush() {
     const patch = pending.current;
@@ -131,6 +175,9 @@ function PageView({ id }: { id: string }) {
       const { data: row } = await supabase.from("pages").select("*").eq("id", id).maybeSingle();
       if (!row) return setNotFound(true);
       const current = row as SharedPageRow;
+      const loaded = toDoc(current.content);
+      inkRefRef.current = readInkRef((loaded as { inkRef?: unknown }).inkRef);
+      lastInkItems.current = inkItemsOf(loaded);
       setPage(current);
 
       await loadChildren();
@@ -146,6 +193,35 @@ function PageView({ id }: { id: string }) {
       setCrumbs(trail);
     })();
   }, [id, reloadKey]);
+
+  // Páginas com escrita à mão feitas antes desta correção não têm a referência guardada: ao abrir a página,
+  // a largura desta tela (onde ela aparece certinha) é guardada, e o link compartilhado passa a usar essa largura.
+  useEffect(() => {
+    if (!page?.id) return;
+    let tries = 0;
+    const iv = window.setInterval(() => {
+      tries += 1;
+      const cur = pageRef.current;
+      if (!cur || tries > 10 || inkRefRef.current) {
+        window.clearInterval(iv);
+        return;
+      }
+      const doc = toDoc(cur.content);
+      if (!inkItemsOf(doc)) {
+        window.clearInterval(iv);
+        return;
+      }
+      const measured = measureInkRef();
+      if (!measured) return;
+      window.clearInterval(iv);
+      inkRefRef.current = measured;
+      const next = { ...doc, inkRef: measured };
+      setPage((c) => (c ? { ...c, content: next } : c));
+      save({ content: next });
+    }, 1000);
+    return () => window.clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page?.id]);
 
   async function loadChildren() {
     const { data: kids } = await supabase.from("pages").select("*").eq("parent_id", id).order("position").order("created_at");
@@ -213,7 +289,9 @@ function PageView({ id }: { id: string }) {
     <Editor 
       key={`${page.id}-${editorVersion}`} 
       initial={toDoc(page.content)} 
-      onChange={(doc: JSONContent) => {
+      onChange={(raw: JSONContent) => {
+        // Guarda junto a largura da folha em que a escrita à mão está posicionada (para o link compartilhado)
+        const doc = withInkRef(raw);
         // Atualiza o estado da página local imediatamente para o PageAssistant receber o texto novo
         setPage((current) => current ? { ...current, content: doc } : current);
         // Mantém a função de salvamento com a lógica de espera (debounce) para o banco de dados
