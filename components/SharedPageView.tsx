@@ -19,6 +19,7 @@ import { InkBlock } from "./editor/ink-extension";
 import InkOverlay, { readInkLayer } from "./editor/InkOverlay";
 import { toDoc } from "@/lib/doc";
 import { SharedViewContext, setVisitorMode } from "@/lib/shared-view";
+import { buildAnchors, measureBlocks, warpItems, type BlockMap } from "@/lib/ink-anchors";
 
 export type SharedPage = {
   id: string;
@@ -33,20 +34,35 @@ export type SharedPage = {
 // Tamanho de referência da escrita à mão: a largura da folha (em pixels) e o espaço entre parágrafos da tela
 // em que a dona do caderno escreveu. A escrita à mão é posicionada em cima do texto, então o texto precisa
 // quebrar as linhas do mesmo jeito para cada traço ficar no lugar certo.
-type InkRef = { w: number; pg: "compact" | "normal" | "airy" };
+// "tops" e "h": topo de cada bloco do texto (e altura total) na tela da dona, para corrigir diferenças de altura
+// (imagens, vídeos, tabelas) no link do visitante.
+type InkRef = { w: number; pg: "compact" | "normal" | "airy"; tops?: number[]; h?: number };
 
 function readInkRef(value: unknown): InkRef | null {
-  const r = value as { w?: unknown; pg?: unknown } | null | undefined;
+  const r = value as { w?: unknown; pg?: unknown; tops?: unknown; h?: unknown } | null | undefined;
   if (!r || typeof r.w !== "number" || !Number.isFinite(r.w) || r.w < 200 || r.w > 4000) return null;
-  return { w: Math.round(r.w), pg: r.pg === "compact" || r.pg === "airy" ? r.pg : "normal" };
+  const ref: InkRef = { w: Math.round(r.w), pg: r.pg === "compact" || r.pg === "airy" ? r.pg : "normal" };
+  if (
+    Array.isArray(r.tops) &&
+    r.tops.length > 0 &&
+    r.tops.length <= 5000 &&
+    r.tops.every((t) => typeof t === "number" && Number.isFinite(t)) &&
+    typeof r.h === "number" &&
+    Number.isFinite(r.h) &&
+    r.h > 0
+  ) {
+    ref.tops = r.tops as number[];
+    ref.h = r.h;
+  }
+  return ref;
 }
 
 // Página publicada: mesmo visual da página original, mas somente leitura (sem barra de edição).
 // Nos PDFs, o visitante vê os comentários da dona e pode fazer os próprios (ficam só neste aparelho).
 export default function SharedPageView({ page, token }: { page: SharedPage; token?: string }) {
-  const doc = toDoc(page.content);
-  const layer = readInkLayer(doc.inkLayer);
-  const inkRef = readInkRef((doc as { inkRef?: unknown }).inkRef);
+  const doc = useMemo(() => toDoc(page.content), [page.content]);
+  const layer = useMemo(() => readInkLayer(doc.inkLayer), [doc]);
+  const inkRef = useMemo(() => readInkRef((doc as { inkRef?: unknown }).inkRef), [doc]);
   // Só ajusta a folha quando há escrita à mão e se sabe em que largura ela foi feita.
   const fitW = layer.items.length > 0 && inkRef ? inkRef.w : 0;
   const fitPg = inkRef?.pg ?? "normal";
@@ -111,6 +127,8 @@ export default function SharedPageView({ page, token }: { page: SharedPage; toke
   const innerRef = useRef<HTMLDivElement>(null);
   const [avail, setAvail] = useState(0);
   const [innerH, setInnerH] = useState(0);
+  // Topo de cada bloco do texto nesta tela (imagens, vídeos e fontes podem ocupar alturas diferentes das da tela da dona).
+  const [vis, setVis] = useState<BlockMap | null>(null);
   const ready = !!editor;
 
   useEffect(() => {
@@ -121,16 +139,43 @@ export default function SharedPageView({ page, token }: { page: SharedPage; toke
     const update = () => {
       setAvail(slot.clientWidth);
       setInnerH(inner.offsetHeight);
+      const m = measureBlocks(inner.querySelector<HTMLElement>(".tiptap"), inner, false);
+      setVis((prev) => (prev && m && prev.h === m.h && prev.tops.join() === m.tops.join() ? prev : m));
     };
     update();
-    if (typeof ResizeObserver === "undefined") return;
+    // Imagens, vídeos e fontes terminam de carregar depois: mede de novo para a escrita acompanhar.
+    const late = [300, 1200, 3000].map((ms) => window.setTimeout(update, ms));
+    inner.addEventListener("load", update, true);
+    const fonts = (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts;
+    fonts?.ready?.then(update).catch(() => undefined);
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        late.forEach((t) => window.clearTimeout(t));
+        inner.removeEventListener("load", update, true);
+      };
+    }
     const ro = new ResizeObserver(update);
     ro.observe(slot);
     ro.observe(inner);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      late.forEach((t) => window.clearTimeout(t));
+      inner.removeEventListener("load", update, true);
+    };
   }, [fitW, ready]);
 
   const scale = fitW && avail ? Math.min(1, avail / fitW) : 1;
+
+  // Escrita à mão ajustada: cada traço acompanha o bloco do texto ao lado do qual a dona o escreveu,
+  // mesmo que imagens, vídeos ou tabelas acima tenham altura diferente aqui.
+  const anchors = useMemo(() => {
+    if (!fitW || !inkRef?.tops || !inkRef.h || !vis) return null;
+    return buildAnchors(inkRef.tops, inkRef.h, vis.tops, vis.h);
+  }, [fitW, inkRef, vis]);
+  const shownLayer = useMemo(
+    () => (anchors && fitW ? { ...layer, items: warpItems(layer.items, fitW, anchors) } : layer),
+    [anchors, fitW, layer]
+  );
 
   const props = page.props ?? {};
   const isLesson = page.type === "lesson";
@@ -183,7 +228,7 @@ export default function SharedPageView({ page, token }: { page: SharedPage; toke
               }}
             >
               <EditorContent editor={editor} />
-              <InkOverlay layer={layer} onChange={() => {}} active={false} onClose={() => {}} />
+              <InkOverlay layer={shownLayer} onChange={() => {}} active={false} onClose={() => {}} />
             </div>
           </div>
         </div>
